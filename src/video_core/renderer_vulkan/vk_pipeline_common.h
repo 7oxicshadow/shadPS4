@@ -5,6 +5,7 @@
 
 #include "shader_recompiler/backend/bindings.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/profile.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -14,9 +15,10 @@ class BufferCache;
 
 namespace Vulkan {
 
-static constexpr auto gp_stage_flags = vk::ShaderStageFlagBits::eVertex |
-                                       vk::ShaderStageFlagBits::eGeometry |
-                                       vk::ShaderStageFlagBits::eFragment;
+static constexpr auto AllGraphicsStageBits =
+    vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eTessellationControl |
+    vk::ShaderStageFlagBits::eTessellationEvaluation | vk::ShaderStageFlagBits::eGeometry |
+    vk::ShaderStageFlagBits::eFragment;
 
 class Instance;
 class Scheduler;
@@ -25,7 +27,8 @@ class DescriptorHeap;
 class Pipeline {
 public:
     Pipeline(const Instance& instance, Scheduler& scheduler, DescriptorHeap& desc_heap,
-             vk::PipelineCache pipeline_cache, bool is_compute = false);
+             const Shader::Profile& profile, vk::PipelineCache pipeline_cache,
+             bool is_compute = false);
     virtual ~Pipeline();
 
     vk::Pipeline Handle() const noexcept {
@@ -37,6 +40,7 @@ public:
     }
 
     auto GetStages() const {
+        static_assert(static_cast<u32>(Shader::LogicalStage::Compute) == Shader::MaxStageTypes - 1);
         if (is_compute) {
             return std::span{stages.cend() - 1, stages.cend()};
         } else {
@@ -44,7 +48,7 @@ public:
         }
     }
 
-    const Shader::Info& GetStage(Shader::Stage stage) const noexcept {
+    const Shader::Info& GetStage(Shader::LogicalStage stage) const noexcept {
         return *stages[u32(stage)];
     }
 
@@ -59,9 +63,12 @@ public:
                        const Shader::PushData& push_data) const;
 
 protected:
+    [[nodiscard]] std::string GetDebugString() const;
+
     const Instance& instance;
     Scheduler& scheduler;
     DescriptorHeap& desc_heap;
+    const Shader::Profile& profile;
     vk::UniquePipeline pipeline;
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniqueDescriptorSetLayout desc_layout;

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include <algorithm>
 #include <span>
 #include <vector>
 #include <boost/container/small_vector.hpp>
@@ -11,20 +10,23 @@
 #include "common/types.h"
 #include "shader_recompiler/backend/bindings.h"
 #include "shader_recompiler/frontend/copy_shader.h"
+#include "shader_recompiler/frontend/tessellation.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/passes/srt.h"
 #include "shader_recompiler/ir/reg.h"
 #include "shader_recompiler/ir/type.h"
 #include "shader_recompiler/params.h"
+#include "shader_recompiler/profile.h"
 #include "shader_recompiler/runtime_info.h"
-#include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/resource.h"
 
 namespace Shader {
 
 static constexpr size_t NumUserDataRegs = 16;
-static constexpr size_t MaxUboSize = 65536;
-static constexpr size_t MaxUboDwords = MaxUboSize >> 2;
+static constexpr size_t NumImages = 64;
+static constexpr size_t NumBuffers = 32;
+static constexpr size_t NumSamplers = 16;
+static constexpr size_t NumFMasks = 8;
 
 enum class TextureType : u32 {
     Color1D,
@@ -37,43 +39,46 @@ enum class TextureType : u32 {
 };
 constexpr u32 NUM_TEXTURE_TYPES = 7;
 
+enum class BufferType : u32 {
+    Guest,
+    ReadConstUbo,
+    GdsBuffer,
+    SharedMemory,
+};
+
 struct Info;
 
 struct BufferResource {
     u32 sharp_idx;
     IR::Type used_types;
     AmdGpu::Buffer inline_cbuf;
-    bool is_gds_buffer{};
-    bool is_instance_data{};
+    BufferType buffer_type;
     u8 instance_attrib{};
     bool is_written{};
+    bool is_formatted{};
 
-    bool IsStorage(AmdGpu::Buffer buffer) const noexcept {
-        return buffer.GetSize() > MaxUboSize || is_written || is_gds_buffer;
+    bool IsSpecial() const noexcept {
+        return buffer_type != BufferType::Guest;
     }
 
-    constexpr AmdGpu::Buffer GetSharp(const Info& info) const noexcept;
-};
-using BufferResourceList = boost::container::small_vector<BufferResource, 16>;
+    bool IsStorage(const AmdGpu::Buffer& buffer, const Profile& profile) const noexcept {
+        return buffer.GetSize() > profile.max_ubo_size || is_written;
+    }
 
-struct TextureBufferResource {
-    u32 sharp_idx;
-    bool is_written{};
-
-    constexpr AmdGpu::Buffer GetSharp(const Info& info) const noexcept;
+    [[nodiscard]] constexpr AmdGpu::Buffer GetSharp(const Info& info) const noexcept;
 };
-using TextureBufferResourceList = boost::container::small_vector<TextureBufferResource, 16>;
+using BufferResourceList = boost::container::small_vector<BufferResource, NumBuffers>;
 
 struct ImageResource {
     u32 sharp_idx;
-    bool is_storage{};
     bool is_depth{};
     bool is_atomic{};
     bool is_array{};
+    bool is_written{};
 
-    constexpr AmdGpu::Image GetSharp(const Info& info) const noexcept;
+    [[nodiscard]] constexpr AmdGpu::Image GetSharp(const Info& info) const noexcept;
 };
-using ImageResourceList = boost::container::small_vector<ImageResource, 16>;
+using ImageResourceList = boost::container::small_vector<ImageResource, NumImages>;
 
 struct SamplerResource {
     u32 sharp_idx;
@@ -83,32 +88,37 @@ struct SamplerResource {
 
     constexpr AmdGpu::Sampler GetSharp(const Info& info) const noexcept;
 };
-using SamplerResourceList = boost::container::small_vector<SamplerResource, 16>;
+using SamplerResourceList = boost::container::small_vector<SamplerResource, NumSamplers>;
 
 struct FMaskResource {
     u32 sharp_idx;
 
     constexpr AmdGpu::Image GetSharp(const Info& info) const noexcept;
 };
-using FMaskResourceList = boost::container::small_vector<FMaskResource, 16>;
+using FMaskResourceList = boost::container::small_vector<FMaskResource, NumFMasks>;
 
 struct PushData {
-    static constexpr u32 BufOffsetIndex = 2;
-    static constexpr u32 UdRegsIndex = 4;
+    static constexpr u32 Step0Index = 0;
+    static constexpr u32 Step1Index = 1;
+    static constexpr u32 XOffsetIndex = 2;
+    static constexpr u32 YOffsetIndex = 3;
+    static constexpr u32 XScaleIndex = 4;
+    static constexpr u32 YScaleIndex = 5;
+    static constexpr u32 UdRegsIndex = 6;
+    static constexpr u32 BufOffsetIndex = UdRegsIndex + NumUserDataRegs / 4;
 
     u32 step0;
     u32 step1;
-    std::array<u8, 32> buf_offsets;
+    float xoffset;
+    float yoffset;
+    float xscale;
+    float yscale;
     std::array<u32, NumUserDataRegs> ud_regs;
+    std::array<u8, NumBuffers> buf_offsets;
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
         buf_offsets[binding] = offset;
-    }
-
-    void AddTexelOffset(u32 binding, u32 multiplier, u32 texel_offset) {
-        ASSERT(texel_offset < 64 && multiplier < 16);
-        buf_offsets[binding] = texel_offset | ((std::bit_width(multiplier) - 1) << 6);
     }
 };
 static_assert(sizeof(PushData) <= 128,
@@ -163,9 +173,9 @@ struct Info {
     UserDataMask ud_mask{};
 
     CopyShaderData gs_copy_data;
+    u32 uses_patches{};
 
     BufferResourceList buffers;
-    TextureBufferResourceList texture_buffers;
     ImageResourceList images;
     SamplerResourceList samplers;
     FMaskResourceList fmasks;
@@ -173,14 +183,16 @@ struct Info {
     PersistentSrtInfo srt_info;
     std::vector<u32> flattened_ud_buf;
 
+    IR::ScalarReg tess_consts_ptr_base = IR::ScalarReg::Max;
+    s32 tess_consts_dword_offset = -1;
+
     std::span<const u32> user_data;
     Stage stage;
+    LogicalStage l_stage;
 
     u64 pgm_hash{};
     VAddr pgm_base;
     bool has_storage_images{};
-    bool has_image_buffers{};
-    bool has_texel_buffers{};
     bool has_discard{};
     bool has_image_gather{};
     bool has_image_query{};
@@ -190,14 +202,18 @@ struct Info {
     bool uses_shared{};
     bool uses_fp16{};
     bool uses_fp64{};
-    bool translation_failed{}; // indicates that shader has unsupported instructions
+    bool uses_pack_10_11_11{};
+    bool uses_unpack_10_11_11{};
+    bool stores_tess_level_outer{};
+    bool stores_tess_level_inner{};
+    bool translation_failed{};
     bool has_readconst{};
     u8 mrt_mask{0u};
     bool has_fetch_shader{false};
     u32 fetch_shader_sgpr_base{0u};
 
-    explicit Info(Stage stage_, ShaderParams params)
-        : stage{stage_}, pgm_hash{params.hash}, pgm_base{params.Base()},
+    explicit Info(Stage stage_, LogicalStage l_stage_, ShaderParams params)
+        : stage{stage_}, l_stage{l_stage_}, pgm_hash{params.hash}, pgm_base{params.Base()},
           user_data{params.user_data} {}
 
     template <typename T>
@@ -228,10 +244,8 @@ struct Info {
     }
 
     void AddBindings(Backend::Bindings& bnd) const {
-        const auto total_buffers =
-            buffers.size() + texture_buffers.size() + (has_readconst ? 1 : 0);
-        bnd.buffer += total_buffers;
-        bnd.unified += total_buffers + images.size() + samplers.size();
+        bnd.buffer += buffers.size();
+        bnd.unified += buffers.size() + images.size() + samplers.size();
         bnd.user_data += ud_mask.NumRegs();
     }
 
@@ -244,14 +258,20 @@ struct Info {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         }
     }
+
+    void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
+        ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD
+        auto buf = ReadUdReg<AmdGpu::Buffer>(static_cast<u32>(tess_consts_ptr_base),
+                                             static_cast<u32>(tess_consts_dword_offset));
+        VAddr tess_constants_addr = buf.base_address;
+        memcpy(&tess_constants,
+               reinterpret_cast<TessellationDataConstantBuffer*>(tess_constants_addr),
+               sizeof(tess_constants));
+    }
 };
 
 constexpr AmdGpu::Buffer BufferResource::GetSharp(const Info& info) const noexcept {
     return inline_cbuf ? inline_cbuf : info.ReadUdSharp<AmdGpu::Buffer>(sharp_idx);
-}
-
-constexpr AmdGpu::Buffer TextureBufferResource::GetSharp(const Info& info) const noexcept {
-    return info.ReadUdSharp<AmdGpu::Buffer>(sharp_idx);
 }
 
 constexpr AmdGpu::Image ImageResource::GetSharp(const Info& info) const noexcept {
@@ -272,14 +292,3 @@ constexpr AmdGpu::Image FMaskResource::GetSharp(const Info& info) const noexcept
 }
 
 } // namespace Shader
-
-template <>
-struct fmt::formatter<Shader::Stage> {
-    constexpr auto parse(format_parse_context& ctx) {
-        return ctx.begin();
-    }
-    auto format(const Shader::Stage stage, format_context& ctx) const {
-        constexpr static std::array names = {"fs", "vs", "gs", "es", "hs", "ls", "cs"};
-        return fmt::format_to(ctx.out(), "{}", names[static_cast<size_t>(stage)]);
-    }
-};

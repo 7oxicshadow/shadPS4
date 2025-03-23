@@ -498,7 +498,7 @@ int PS4_SYSV_ABI sceNpTrophyGetTrophyInfo(OrbisNpTrophyContext context, OrbisNpT
 s32 PS4_SYSV_ABI sceNpTrophyGetTrophyUnlockState(OrbisNpTrophyContext context,
                                                  OrbisNpTrophyHandle handle,
                                                  OrbisNpTrophyFlagArray* flags, u32* count) {
-    LOG_INFO(Lib_NpTrophy, "GetTrophyUnlockState called");
+    LOG_INFO(Lib_NpTrophy, "called");
 
     if (context == ORBIS_NP_TROPHY_INVALID_CONTEXT)
         return ORBIS_NP_TROPHY_ERROR_INVALID_CONTEXT;
@@ -519,8 +519,9 @@ s32 PS4_SYSV_ABI sceNpTrophyGetTrophyUnlockState(OrbisNpTrophyContext context,
     pugi::xml_parse_result result = doc.load_file(trophy_file.native().c_str());
 
     if (!result) {
-        LOG_ERROR(Lib_NpTrophy, "Failed to open trophy xml : {}", result.description());
-        return -1;
+        LOG_ERROR(Lib_NpTrophy, "Failed to open trophy XML: {}", result.description());
+        *count = 0;
+        return ORBIS_OK;
     }
 
     int num_trophies = 0;
@@ -922,15 +923,16 @@ int PS4_SYSV_ABI sceNpTrophyUnlockTrophy(OrbisNpTrophyContext context, OrbisNpTr
                         node.attribute("unlockstate").set_value("true");
                     }
 
-                    Rtc::OrbisRtcTick trophyTimestamp;
-                    Rtc::sceRtcGetCurrentTick(&trophyTimestamp);
+                    auto trophyTimestamp = std::chrono::duration_cast<std::chrono::seconds>(
+                                               std::chrono::system_clock::now().time_since_epoch())
+                                               .count();
 
                     if (node.attribute("timestamp").empty()) {
                         node.append_attribute("timestamp") =
-                            std::to_string(trophyTimestamp.tick).c_str();
+                            std::to_string(trophyTimestamp).c_str();
                     } else {
                         node.attribute("timestamp")
-                            .set_value(std::to_string(trophyTimestamp.tick).c_str());
+                            .set_value(std::to_string(trophyTimestamp).c_str());
                     }
 
                     std::string trophy_icon_file = "TROP";
@@ -940,7 +942,7 @@ int PS4_SYSV_ABI sceNpTrophyUnlockTrophy(OrbisNpTrophyContext context, OrbisNpTr
                     std::filesystem::path current_icon_path =
                         trophy_dir / "trophy00" / "Icons" / trophy_icon_file;
 
-                    AddTrophyToQueue(current_icon_path, current_trophy_name);
+                    AddTrophyToQueue(current_icon_path, current_trophy_name, current_trophy_type);
                 }
             }
         }
@@ -954,15 +956,16 @@ int PS4_SYSV_ABI sceNpTrophyUnlockTrophy(OrbisNpTrophyContext context, OrbisNpTr
                 platinum_node.attribute("unlockstate").set_value("true");
             }
 
-            Rtc::OrbisRtcTick trophyTimestamp;
-            Rtc::sceRtcGetCurrentTick(&trophyTimestamp);
+            auto trophyTimestamp = std::chrono::duration_cast<std::chrono::seconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count();
 
             if (platinum_node.attribute("timestamp").empty()) {
                 platinum_node.append_attribute("timestamp") =
-                    std::to_string(trophyTimestamp.tick).c_str();
+                    std::to_string(trophyTimestamp).c_str();
             } else {
                 platinum_node.attribute("timestamp")
-                    .set_value(std::to_string(trophyTimestamp.tick).c_str());
+                    .set_value(std::to_string(trophyTimestamp).c_str());
             }
 
             int platinum_trophy_id =
@@ -977,7 +980,7 @@ int PS4_SYSV_ABI sceNpTrophyUnlockTrophy(OrbisNpTrophyContext context, OrbisNpTr
                 trophy_dir / "trophy00" / "Icons" / platinum_icon_file;
 
             *platinumId = platinum_trophy_id;
-            AddTrophyToQueue(platinum_icon_path, platinum_trophy_name);
+            AddTrophyToQueue(platinum_icon_path, platinum_trophy_name, "P");
         }
     }
 

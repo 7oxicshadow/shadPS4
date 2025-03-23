@@ -69,11 +69,17 @@ enum class Attribute : u64 {
     SampleIndex = 72,
     GlobalInvocationId = 73,
     WorkgroupId = 74,
-    LocalInvocationId = 75,
-    LocalInvocationIndex = 76,
-    FragCoord = 77,
-    InstanceId0 = 78, // step rate 0
-    InstanceId1 = 79, // step rate 1
+    WorkgroupIndex = 75,
+    LocalInvocationId = 76,
+    LocalInvocationIndex = 77,
+    FragCoord = 78,
+    InstanceId0 = 79,  // step rate 0
+    InstanceId1 = 80,  // step rate 1
+    InvocationId = 81, // TCS id in output patch and instanced geometry shader id
+    PatchVertices = 82,
+    TessellationEvaluationPointU = 83,
+    TessellationEvaluationPointV = 84,
+    PackedHullInvocationInfo = 85, // contains patch id within the VGT and invocation ID
     Max,
 };
 
@@ -83,6 +89,11 @@ constexpr size_t NumParams = 32;
 
 constexpr bool IsPosition(Attribute attribute) noexcept {
     return attribute >= Attribute::Position0 && attribute <= Attribute::Position3;
+}
+
+constexpr bool IsTessCoord(Attribute attribute) noexcept {
+    return attribute >= Attribute::TessellationEvaluationPointU &&
+           attribute <= Attribute::TessellationEvaluationPointV;
 }
 
 constexpr bool IsParam(Attribute attribute) noexcept {

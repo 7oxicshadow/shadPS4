@@ -7,6 +7,7 @@
 #include "common/bit_field.h"
 #include "common/enum.h"
 #include "common/types.h"
+#include "video_core/amdgpu/types.h"
 
 namespace Shader::IR {
 
@@ -40,7 +41,8 @@ union TextureInstInfo {
     BitField<6, 2, u32> gather_comp;
     BitField<8, 1, u32> has_derivatives;
     BitField<9, 1, u32> is_array;
-    BitField<10, 1, u32> is_gather;
+    BitField<10, 1, u32> is_unnormalized;
+    BitField<11, 1, u32> is_gather;
 };
 
 union BufferInstInfo {
@@ -48,7 +50,11 @@ union BufferInstInfo {
     BitField<0, 1, u32> index_enable;
     BitField<1, 1, u32> offset_enable;
     BitField<2, 12, u32> inst_offset;
-    BitField<14, 1, u32> ring_access; // global + system coherency
+    BitField<14, 1, u32> system_coherent;
+    BitField<15, 1, u32> globally_coherent;
+    BitField<16, 1, u32> typed;
+    BitField<17, 4, AmdGpu::DataFormat> inst_data_fmt;
+    BitField<21, 3, AmdGpu::NumberFormat> inst_num_fmt;
 };
 
 enum class ScalarReg : u32 {

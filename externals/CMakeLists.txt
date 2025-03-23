@@ -8,6 +8,9 @@ set_directory_properties(PROPERTIES
     SYSTEM ON
 )
 
+# Set CMP0069 policy to "NEW" in order to ensure consistent behavior when building external targets with LTO enabled
+set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
+
 if (MSVC)
     # Silence "deprecation" warnings
     add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE -D_SCL_SECURE_NO_WARNINGS)
@@ -15,8 +18,6 @@ endif()
 
 # Boost
 if (NOT TARGET Boost::headers)
-    set(BOOST_ROOT "${CMAKE_SOURCE_DIR}/externals/ext-boost" CACHE STRING "")
-    set(Boost_NO_SYSTEM_PATHS ON CACHE BOOL "")
     add_subdirectory(ext-boost)
 endif()
 
@@ -25,22 +26,19 @@ if (NOT TARGET fmt::fmt)
     add_subdirectory(fmt)
 endif()
 
-if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND MSVC)
-    # If it is clang and MSVC we will add a static lib
-    # CryptoPP
-    add_subdirectory(cryptoppwin)
-    target_include_directories(cryptoppwin INTERFACE cryptoppwin/include)
-else()
-    # CryptoPP
-    if (NOT TARGET cryptopp::cryptopp)
-        set(CRYPTOPP_INSTALL OFF)
-        set(CRYPTOPP_BUILD_TESTING OFF)
-        set(CRYPTOPP_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cryptopp)
-        add_subdirectory(cryptopp-cmake)
-        file(COPY cryptopp DESTINATION cryptopp FILES_MATCHING PATTERN "*.h")
-        # remove externals/cryptopp from include directories because it contains a conflicting zlib.h file
-        set_target_properties(cryptopp PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/cryptopp")
-    endif()
+# CryptoPP
+if (NOT TARGET cryptopp::cryptopp)
+    set(CRYPTOPP_INSTALL OFF)
+    set(CRYPTOPP_BUILD_TESTING OFF)
+    set(CRYPTOPP_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/cryptopp)
+    # cryptopp instruction set checks do not account for added compile options,
+    # so disable extensions in the library config to match our chosen target CPU.
+    set(CRYPTOPP_DISABLE_AESNI ON)
+    set(CRYPTOPP_DISABLE_AVX2 ON)
+    add_subdirectory(cryptopp-cmake)
+    file(COPY cryptopp DESTINATION cryptopp FILES_MATCHING PATTERN "*.h")
+    # remove externals/cryptopp from include directories because it contains a conflicting zlib.h file
+    set_target_properties(cryptopp PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/cryptopp")
 endif()
 
 if (NOT TARGET FFmpeg::ffmpeg)
@@ -74,6 +72,7 @@ endif()
 
 # SDL3
 if (NOT TARGET SDL3::SDL3)
+    set(SDL_TEST_LIBRARY OFF)
     set(SDL_PIPEWIRE OFF)
     add_subdirectory(sdl3)
 endif()
@@ -107,7 +106,7 @@ if (NOT TARGET glslang::glslang)
     set(ENABLE_OPT OFF CACHE BOOL "")
     add_subdirectory(glslang)
     file(COPY glslang/SPIRV DESTINATION glslang/glslang FILES_MATCHING PATTERN "*.h")
-    target_include_directories(SPIRV INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/glslang")
+    target_include_directories(glslang INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/glslang")
 endif()
 
 # Robin-map
@@ -128,6 +127,14 @@ endif()
 # Toml11
 if (NOT TARGET toml11::toml11)
     add_subdirectory(toml11)
+
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+      if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        get_target_property(_toml11_compile_options toml11 INTERFACE_COMPILE_OPTIONS)
+        list(REMOVE_ITEM _toml11_compile_options "/Zc:preprocessor")
+        set_target_properties(toml11 PROPERTIES INTERFACE_COMPILE_OPTIONS ${_toml11_compile_options})
+      endif()
+    endif()
 endif()
 
 # xxHash
@@ -174,15 +181,6 @@ if (NOT TARGET PNG::PNG)
     add_library(PNG::PNG ALIAS png_static)
 endif()
 
-if (APPLE)
-    # date
-    if (NOT TARGET date::date-tz)
-        option(BUILD_TZ_LIB "" ON)
-        option(USE_SYSTEM_TZ_DB "" ON)
-        add_subdirectory(date)
-    endif()
-endif()
-
 # Dear ImGui
 add_library(Dear_ImGui
         dear_imgui/imgui.cpp
@@ -195,11 +193,15 @@ add_library(Dear_ImGui
 target_include_directories(Dear_ImGui INTERFACE dear_imgui/)
 
 # Tracy
-option(TRACY_ENABLE "" ON)
+if (CMAKE_BUILD_TYPE STREQUAL "Release")
+    option(TRACY_ENABLE "" OFF)
+else()
+    option(TRACY_ENABLE "" ON)
+endif()
 option(TRACY_NO_CRASH_HANDLER "" ON) # Otherwise texture cache exceptions will be treaten as a crash
 option(TRACY_ON_DEMAND "" ON)
 option(TRACY_NO_FRAME_IMAGE "" ON)
-option(TRACY_FIBERS "" ON) # For AmdGpu frontend profiling
+option(TRACY_FIBERS "" OFF) # For AmdGpu frontend profiling, disabled due to instability
 option(TRACY_NO_SYSTEM_TRACING "" ON)
 option(TRACY_NO_CALLSTACK "" ON)
 option(TRACY_NO_CODE_TRANSFER "" ON)
@@ -215,9 +217,7 @@ endif()
 
 # Discord RPC
 if (ENABLE_DISCORD_RPC)
-    set(BUILD_EXAMPLES OFF)
     add_subdirectory(discord-rpc)
-    target_include_directories(discord-rpc INTERFACE discord-rpc/include)
 endif()
 
 # GCN Headers
@@ -228,4 +228,19 @@ if (NOT TARGET stb::headers)
     add_library(stb INTERFACE)
     target_include_directories(stb INTERFACE stb)
     add_library(stb::headers ALIAS stb)
+endif()
+
+# Apple-only dependencies
+if (APPLE)
+    # date
+    if (NOT TARGET date::date-tz)
+        option(BUILD_TZ_LIB "" ON)
+        option(USE_SYSTEM_TZ_DB "" ON)
+        add_subdirectory(date)
+    endif()
+
+    # MoltenVK
+    if (NOT TARGET MoltenVK)
+        add_subdirectory(MoltenVK)
+    endif()
 endif()

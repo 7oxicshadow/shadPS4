@@ -3,7 +3,13 @@
 
 #pragma once
 
+#include <unordered_map>
+#include <QDir>
+#include <QDirIterator>
+#include <QImage>
+#include <QString>
 #include "common/path_util.h"
+#include "compatibility_info.h"
 
 struct GameInfo {
     std::filesystem::path path;      // root path of game directory
@@ -21,12 +27,14 @@ struct GameInfo {
     std::string fw = "Unknown";
 
     std::string play_time = "Unknown";
+    CompatibilityEntry compatibility = CompatibilityEntry{CompatibilityStatus::Unknown};
 };
 
-class GameListUtils {
+class GameListUtils : public QObject {
+    Q_OBJECT
 public:
     static QString FormatSize(qint64 size) {
-        static const QStringList suffixes = {"B", "KB", "MB", "GB", "TB"};
+        static const QStringList suffixes = {tr("B"), tr("KB"), tr("MB"), tr("GB"), tr("TB")};
         int suffixIndex = 0;
 
         double gameSize = static_cast<double>(size);
@@ -54,11 +62,50 @@ public:
         QDir dir(dirPath);
         QDirIterator it(dir.absolutePath(), QDirIterator::Subdirectories);
         qint64 total = 0;
+
+        if (!Config::GetLoadGameSizeEnabled()) {
+            game.size = FormatSize(0).toStdString();
+            return;
+        }
+
+        // Cache path
+        QDir cacheDir =
+            QDir(Common::FS::GetUserPath(Common::FS::PathType::MetaDataDir) / game.serial);
+        if (!cacheDir.exists()) {
+            cacheDir.mkpath(".");
+        }
+        QFile size_cache_file(cacheDir.absoluteFilePath("size_cache.txt"));
+        QFileInfo cacheInfo(size_cache_file);
+        QFileInfo dirInfo(dirPath);
+
+        // Check if cache file exists and is valid
+        if (size_cache_file.exists() && cacheInfo.lastModified() >= dirInfo.lastModified()) {
+            if (size_cache_file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QTextStream in(&size_cache_file);
+                QString cachedSize = in.readLine();
+                size_cache_file.close();
+
+                if (!cachedSize.isEmpty()) {
+                    game.size = cachedSize.toStdString();
+                    return;
+                }
+            }
+        }
+
+        // Cache is invalid or does not exist; calculate size
         while (it.hasNext()) {
             it.next();
             total += it.fileInfo().size();
         }
+
         game.size = FormatSize(total).toStdString();
+
+        // Save new cache
+        if (size_cache_file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&size_cache_file);
+            out << QString::fromStdString(game.size) << "\n";
+            size_cache_file.close();
+        }
     }
 
     static QString GetRegion(char region) {
@@ -154,6 +201,32 @@ public:
             for (int j = c1; j < c2; j++, p -= 4)
                 for (int i = i1; i <= i2; i++)
                     p[i] = (rgba[i] += ((p[i] << 4) - rgba[i]) * alpha / 16) >> 4;
+        }
+
+        return result;
+    }
+
+    // Opacity is a float between 0 and 1
+    static QImage ChangeImageOpacity(const QImage& image, const QRect& rect, float opacity) {
+        // Convert to ARGB32 format to ensure alpha channel support
+        QImage result = image.convertToFormat(QImage::Format_ARGB32);
+
+        // Ensure opacity is between 0 and 1
+        opacity = std::clamp(opacity, 0.0f, 1.0f);
+
+        // Convert opacity to integer alpha value (0-255)
+        int alpha = static_cast<int>(opacity * 255);
+
+        // Process only the specified rectangle area
+        for (int y = rect.top(); y <= rect.bottom(); ++y) {
+            QRgb* line = reinterpret_cast<QRgb*>(result.scanLine(y));
+            for (int x = rect.left(); x <= rect.right(); ++x) {
+                // Get current pixel
+                QRgb pixel = line[x];
+                // Keep RGB values, but modify alpha while preserving relative transparency
+                int newAlpha = (qAlpha(pixel) * alpha) / 255;
+                line[x] = qRgba(qRed(pixel), qGreen(pixel), qBlue(pixel), newAlpha);
+            }
         }
 
         return result;

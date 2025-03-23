@@ -12,6 +12,7 @@ public:
     QAction* bootInstallPkgAct;
     QAction* bootGameAct;
     QAction* addElfFolderAct;
+    QAction* shadFolderAct;
     QAction* exitAct;
     QAction* showGameListAct;
     QAction* refreshGameListAct;
@@ -36,6 +37,9 @@ public:
     QAction* setThemeGreen;
     QAction* setThemeBlue;
     QAction* setThemeViolet;
+    QAction* setThemeGruvbox;
+    QAction* setThemeTokyoNight;
+    QAction* setThemeOled;
     QWidget* centralWidget;
     QLineEdit* mw_searchbar;
     QPushButton* playButton;
@@ -44,6 +48,7 @@ public:
     QPushButton* refreshButton;
     QPushButton* settingsButton;
     QPushButton* controllerButton;
+    QPushButton* keyboardButton;
 
     QWidget* sizeSliderContainer;
     QHBoxLayout* sizeSliderContainer_layout;
@@ -87,6 +92,9 @@ public:
         addElfFolderAct = new QAction(MainWindow);
         addElfFolderAct->setObjectName("addElfFolderAct");
         addElfFolderAct->setIcon(QIcon(":images/folder_icon.png"));
+        shadFolderAct = new QAction(MainWindow);
+        shadFolderAct->setObjectName("shadFolderAct");
+        shadFolderAct->setIcon(QIcon(":images/folder_icon.png"));
         exitAct = new QAction(MainWindow);
         exitAct->setObjectName("exitAct");
         exitAct->setIcon(QIcon(":images/exit_icon.png"));
@@ -158,6 +166,15 @@ public:
         setThemeViolet = new QAction(MainWindow);
         setThemeViolet->setObjectName("setThemeViolet");
         setThemeViolet->setCheckable(true);
+        setThemeGruvbox = new QAction(MainWindow);
+        setThemeGruvbox->setObjectName("setThemeGruvbox");
+        setThemeGruvbox->setCheckable(true);
+        setThemeTokyoNight = new QAction(MainWindow);
+        setThemeTokyoNight->setObjectName("setThemeTokyoNight");
+        setThemeTokyoNight->setCheckable(true);
+        setThemeOled = new QAction(MainWindow);
+        setThemeOled->setObjectName("setThemeOled");
+        setThemeOled->setCheckable(true);
         centralWidget = new QWidget(MainWindow);
         centralWidget->setObjectName("centralWidget");
         sizePolicy.setHeightForWidth(centralWidget->sizePolicy().hasHeightForWidth());
@@ -198,6 +215,10 @@ public:
         controllerButton->setFlat(true);
         controllerButton->setIcon(QIcon(":images/controller_icon.png"));
         controllerButton->setIconSize(QSize(40, 40));
+        keyboardButton = new QPushButton(centralWidget);
+        keyboardButton->setFlat(true);
+        keyboardButton->setIcon(QIcon(":images/keyboard_icon.png"));
+        keyboardButton->setIconSize(QSize(48, 44));
 
         sizeSliderContainer = new QWidget(centralWidget);
         sizeSliderContainer->setObjectName("sizeSliderContainer");
@@ -266,7 +287,9 @@ public:
         menuBar->addAction(menuHelp->menuAction());
         menuFile->addAction(bootInstallPkgAct);
         menuFile->addAction(bootGameAct);
+        menuFile->addSeparator();
         menuFile->addAction(addElfFolderAct);
+        menuFile->addAction(shadFolderAct);
         menuFile->addSeparator();
         menuFile->addAction(menuRecent->menuAction());
         menuFile->addSeparator();
@@ -282,6 +305,9 @@ public:
         menuThemes->addAction(setThemeGreen);
         menuThemes->addAction(setThemeBlue);
         menuThemes->addAction(setThemeViolet);
+        menuThemes->addAction(setThemeGruvbox);
+        menuThemes->addAction(setThemeTokyoNight);
+        menuThemes->addAction(setThemeOled);
         menuGame_List_Icons->addAction(setIconSizeTinyAct);
         menuGame_List_Icons->addAction(setIconSizeSmallAct);
         menuGame_List_Icons->addAction(setIconSizeMediumAct);
@@ -323,6 +349,8 @@ public:
             "MainWindow", "Install application from a .pkg file", nullptr));
 #endif // QT_CONFIG(tooltip)
         menuRecent->setTitle(QCoreApplication::translate("MainWindow", "Recent Games", nullptr));
+        shadFolderAct->setText(
+            QCoreApplication::translate("MainWindow", "Open shadPS4 Folder", nullptr));
         exitAct->setText(QCoreApplication::translate("MainWindow", "Exit", nullptr));
 #if QT_CONFIG(tooltip)
         exitAct->setToolTip(QCoreApplication::translate("MainWindow", "Exit shadPS4", nullptr));
@@ -368,6 +396,9 @@ public:
         setThemeGreen->setText(QCoreApplication::translate("MainWindow", "Green", nullptr));
         setThemeBlue->setText(QCoreApplication::translate("MainWindow", "Blue", nullptr));
         setThemeViolet->setText(QCoreApplication::translate("MainWindow", "Violet", nullptr));
+        setThemeGruvbox->setText("Gruvbox");
+        setThemeTokyoNight->setText("Tokyo Night");
+        setThemeOled->setText("OLED");
         toolBar->setWindowTitle(QCoreApplication::translate("MainWindow", "toolBar", nullptr));
     } // retranslateUi
 };

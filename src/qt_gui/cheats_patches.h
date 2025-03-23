@@ -36,6 +36,7 @@ public:
                         const QString& m_gameVersion, bool showMessageBox);
     void downloadPatches(const QString repository, const bool showMessageBox);
     void createFilesJson(const QString& repository);
+    void clearListCheats();
     void compatibleVersionNotice(const QString repository);
 
 signals:
@@ -109,7 +110,11 @@ private:
     QComboBox* patchesComboBox;
     QListView* patchesListView;
 
-    QString defaultTextEdit;
+    // Strings
+    QString defaultTextEdit_MSG;
+    QString CheatsNotFound_MSG;
+    QString CheatsDownloadedSuccessfully_MSG;
+    QString DownloadComplete_MSG;
 };
 
 #endif // CHEATS_PATCHES_H

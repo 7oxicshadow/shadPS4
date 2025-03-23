@@ -18,6 +18,8 @@ vk::StencilOp StencilOp(Liverpool::StencilFunc op);
 
 vk::CompareOp CompareOp(Liverpool::CompareFunc func);
 
+bool IsPrimitiveCulled(AmdGpu::PrimitiveType type);
+
 vk::PrimitiveTopology PrimitiveType(AmdGpu::PrimitiveType type);
 
 vk::PolygonMode PolygonMode(Liverpool::PolygonMode mode);
@@ -40,6 +42,10 @@ vk::SamplerMipmapMode MipFilter(AmdGpu::MipFilter filter);
 
 vk::BorderColor BorderColor(AmdGpu::BorderColor color);
 
+vk::ComponentSwizzle ComponentSwizzle(AmdGpu::CompSwizzle comp_swizzle);
+
+vk::ComponentMapping ComponentMapping(AmdGpu::CompMapping comp_mapping);
+
 struct SurfaceFormatInfo {
     AmdGpu::DataFormat data_format;
     AmdGpu::NumberFormat number_format;
@@ -49,9 +55,6 @@ struct SurfaceFormatInfo {
 std::span<const SurfaceFormatInfo> SurfaceFormats();
 
 vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format);
-
-vk::Format AdjustColorBufferFormat(vk::Format base_format,
-                                   Liverpool::ColorBuffer::SwapMode comp_swap);
 
 struct DepthFormatInfo {
     Liverpool::DepthBuffer::ZFormat z_format;
@@ -68,41 +71,40 @@ vk::ClearValue ColorBufferClearValue(const AmdGpu::Liverpool::ColorBuffer& color
 
 vk::SampleCountFlagBits NumSamples(u32 num_samples, vk::SampleCountFlags supported_flags);
 
-static constexpr u16 NumVerticesPerQuad = 4;
-
-inline void EmitQuadToTriangleListIndices(u8* out_ptr, u32 num_vertices) {
-    u16* out_data = reinterpret_cast<u16*>(out_ptr);
-    for (u16 i = 0; i < num_vertices; i += NumVerticesPerQuad) {
-        *out_data++ = i;
-        *out_data++ = i + 1;
-        *out_data++ = i + 2;
-        *out_data++ = i;
-        *out_data++ = i + 2;
-        *out_data++ = i + 3;
+static inline bool IsFormatDepthCompatible(vk::Format fmt) {
+    switch (fmt) {
+    // 32-bit float compatible
+    case vk::Format::eD32Sfloat:
+    case vk::Format::eR32Sfloat:
+    case vk::Format::eR32Uint:
+    // 16-bit unorm compatible
+    case vk::Format::eD16Unorm:
+    case vk::Format::eR16Unorm:
+        return true;
+    default:
+        return false;
     }
 }
 
-template <typename T>
-void ConvertQuadToTriangleListIndices(u8* out_ptr, const u8* in_ptr, u32 num_vertices) {
-    T* out_data = reinterpret_cast<T*>(out_ptr);
-    const T* in_data = reinterpret_cast<const T*>(in_ptr);
-    for (u16 i = 0; i < num_vertices; i += NumVerticesPerQuad) {
-        *out_data++ = in_data[i];
-        *out_data++ = in_data[i + 1];
-        *out_data++ = in_data[i + 2];
-        *out_data++ = in_data[i];
-        *out_data++ = in_data[i + 2];
-        *out_data++ = in_data[i + 3];
+static inline bool IsFormatStencilCompatible(vk::Format fmt) {
+    switch (fmt) {
+    // 8-bit uint compatible
+    case vk::Format::eS8Uint:
+    case vk::Format::eR8Uint:
+    case vk::Format::eR8Unorm:
+        return true;
+    default:
+        return false;
     }
 }
 
 static inline vk::Format PromoteFormatToDepth(vk::Format fmt) {
-    if (fmt == vk::Format::eR32Sfloat) {
+    if (fmt == vk::Format::eR32Sfloat || fmt == vk::Format::eR32Uint) {
         return vk::Format::eD32Sfloat;
     } else if (fmt == vk::Format::eR16Unorm) {
         return vk::Format::eD16Unorm;
     }
-    UNREACHABLE();
+    UNREACHABLE_MSG("Unexpected depth format {}", vk::to_string(fmt));
 }
 
 } // namespace Vulkan::LiverpoolToVK

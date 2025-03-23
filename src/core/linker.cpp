@@ -5,6 +5,7 @@
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/config.h"
+#include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
 #include "common/string_util.h"
@@ -51,7 +52,7 @@ Linker::Linker() : memory{Memory::Instance()} {}
 
 Linker::~Linker() = default;
 
-void Linker::Execute() {
+void Linker::Execute(const std::vector<std::string> args) {
     if (Config::debugDump()) {
         DebugDump();
     }
@@ -65,22 +66,42 @@ void Linker::Execute() {
         Relocate(m.get());
     }
 
-    // Configure used flexible memory size.
-    if (const auto* proc_param = GetProcParam()) {
-        if (proc_param->size >=
-            offsetof(OrbisProcParam, mem_param) + sizeof(OrbisKernelMemParam*)) {
-            if (const auto* mem_param = proc_param->mem_param) {
-                if (mem_param->size >=
-                    offsetof(OrbisKernelMemParam, flexible_memory_size) + sizeof(u64*)) {
-                    if (const auto* flexible_size = mem_param->flexible_memory_size) {
-                        memory->SetupMemoryRegions(*flexible_size);
-                    }
+    // Configure the direct and flexible memory regions.
+    u64 fmem_size = SCE_FLEXIBLE_MEMORY_SIZE;
+    bool use_extended_mem1 = true, use_extended_mem2 = true;
+
+    const auto* proc_param = GetProcParam();
+    ASSERT(proc_param);
+
+    Core::OrbisKernelMemParam mem_param{};
+    if (proc_param->size >= offsetof(OrbisProcParam, mem_param) + sizeof(OrbisKernelMemParam*)) {
+        if (proc_param->mem_param) {
+            mem_param = *proc_param->mem_param;
+            if (mem_param.size >=
+                offsetof(OrbisKernelMemParam, flexible_memory_size) + sizeof(u64*)) {
+                if (const auto* flexible_size = mem_param.flexible_memory_size) {
+                    fmem_size = *flexible_size + SCE_FLEXIBLE_MEMORY_BASE;
                 }
             }
         }
     }
 
-    main_thread.Run([this, module](std::stop_token) {
+    if (mem_param.size < offsetof(OrbisKernelMemParam, extended_memory_1) + sizeof(u64*)) {
+        mem_param.extended_memory_1 = nullptr;
+    }
+    if (mem_param.size < offsetof(OrbisKernelMemParam, extended_memory_2) + sizeof(u64*)) {
+        mem_param.extended_memory_2 = nullptr;
+    }
+
+    const u64 sdk_ver = proc_param->sdk_version;
+    if (sdk_ver < Common::ElfInfo::FW_50) {
+        use_extended_mem1 = mem_param.extended_memory_1 ? *mem_param.extended_memory_1 : false;
+        use_extended_mem2 = mem_param.extended_memory_2 ? *mem_param.extended_memory_2 : false;
+    }
+
+    memory->SetupMemoryRegions(fmem_size, use_extended_mem1, use_extended_mem2);
+
+    main_thread.Run([this, module, args](std::stop_token) {
         Common::SetCurrentThreadName("GAME_MainThread");
         LoadSharedLibraries();
 
@@ -88,6 +109,12 @@ void Linker::Execute() {
         EntryParams params{};
         params.argc = 1;
         params.argv[0] = "eboot.bin";
+        if (!args.empty()) {
+            params.argc = args.size() + 1;
+            for (int i = 0; i < args.size() && i < 32; i++) {
+                params.argv[i + 1] = args[i].c_str();
+            }
+        }
         params.entry_addr = module->GetEntryAddress();
         RunMainEntry(&params);
     });
@@ -110,6 +137,35 @@ s32 Linker::LoadModule(const std::filesystem::path& elf_name, bool is_dynamic) {
     num_static_modules += !is_dynamic;
     m_modules.emplace_back(std::move(module));
     return m_modules.size() - 1;
+}
+
+s32 Linker::LoadAndStartModule(const std::filesystem::path& path, u64 args, const void* argp,
+                               int* pRes) {
+    u32 handle = FindByName(path);
+    if (handle != -1) {
+        return handle;
+    }
+    handle = LoadModule(path, true);
+    if (handle == -1) {
+        return -1;
+    }
+    auto* module = GetModule(handle);
+    RelocateAnyImports(module);
+
+    // If the new module has a TLS image, trigger its load when TlsGetAddr is called.
+    if (module->tls.image_size != 0) {
+        AdvanceGenerationCounter();
+    }
+
+    // Retrieve and verify proc param according to libkernel.
+    u64* param = module->GetProcParam<u64*>();
+    ASSERT_MSG(!param || param[0] >= 0x18, "Invalid module param size: {}", param[0]);
+    s32 ret = module->Start(args, argp, param);
+    if (pRes) {
+        *pRes = ret;
+    }
+
+    return handle;
 }
 
 Module* Linker::FindByAddress(VAddr address) {
