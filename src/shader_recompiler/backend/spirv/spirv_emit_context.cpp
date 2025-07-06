@@ -7,6 +7,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/types.h"
+#include "video_core/buffer_cache/buffer_cache.h"
 
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
@@ -70,6 +71,12 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
                          Bindings& binding_)
     : Sirit::Module(profile_.supported_spirv), info{info_}, runtime_info{runtime_info_},
       profile{profile_}, stage{info.stage}, l_stage{info.l_stage}, binding{binding_} {
+    if (info.uses_dma) {
+        SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
+    } else {
+        SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
+    }
+
     AddCapability(spv::Capability::Shader);
     DefineArithmeticTypes();
     DefineInterfaces();
@@ -137,9 +144,14 @@ void EmitContext::DefineArithmeticTypes() {
 
     true_value = ConstantTrue(U1[1]);
     false_value = ConstantFalse(U1[1]);
+    u8_one_value = Constant(U8, 1U);
+    u8_zero_value = Constant(U8, 0U);
+    u16_zero_value = Constant(U16, 0U);
     u32_one_value = ConstU32(1U);
     u32_zero_value = ConstU32(0U);
     f32_zero_value = ConstF32(0.0f);
+    u64_one_value = Constant(U64, 1ULL);
+    u64_zero_value = Constant(U64, 0ULL);
 
     pi_x2 = ConstF32(2.0f * float{std::numbers::pi});
 
@@ -156,6 +168,9 @@ void EmitContext::DefineArithmeticTypes() {
     frexp_result_f32 = Name(TypeStruct(F32[1], S32[1]), "frexp_result_f32");
     if (info.uses_fp64) {
         frexp_result_f64 = Name(TypeStruct(F64[1], S32[1]), "frexp_result_f64");
+    }
+    if (info.uses_dma) {
+        physical_pointer_type_u32 = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
     }
 }
 
@@ -195,9 +210,10 @@ EmitContext::SpirvAttribute EmitContext::GetAttributeInfo(AmdGpu::NumberFormat f
 }
 
 Id EmitContext::GetBufferSize(const u32 sharp_idx) {
-    const auto& srt_flatbuf = buffers.back();
-    ASSERT(srt_flatbuf.buffer_type == BufferType::ReadConstUbo);
-    const auto [id, pointer_type] = srt_flatbuf[BufferAlias::U32];
+    // Can this be done with memory access? Like we do now with ReadConst
+    const auto& srt_flatbuf = buffers[flatbuf_index];
+    ASSERT(srt_flatbuf.buffer_type == BufferType::Flatbuf);
+    const auto [id, pointer_type] = srt_flatbuf.Alias(PointerType::U32);
 
     const auto rsrc1{
         OpLoad(U32[1], OpAccessChain(pointer_type, id, u32_zero_value, ConstU32(sharp_idx + 1)))};
@@ -213,37 +229,70 @@ Id EmitContext::GetBufferSize(const u32 sharp_idx) {
 }
 
 void EmitContext::DefineBufferProperties() {
+    if (!profile.needs_buffer_offsets && profile.supports_robust_buffer_access) {
+        return;
+    }
     for (u32 i = 0; i < buffers.size(); i++) {
-        BufferDefinition& buffer = buffers[i];
+        auto& buffer = buffers[i];
+        const auto& desc = info.buffers[i];
+        const u32 binding = buffer.binding;
         if (buffer.buffer_type != BufferType::Guest) {
             continue;
         }
-        const u32 binding = buffer.binding;
-        const u32 half = PushData::BufOffsetIndex + (binding >> 4);
-        const u32 comp = (binding & 0xf) >> 2;
-        const u32 offset = (binding & 0x3) << 3;
-        const Id ptr{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
-                                   push_data_block, ConstU32(half), ConstU32(comp))};
-        const Id value{OpLoad(U32[1], ptr)};
-        buffer.offset = OpBitFieldUExtract(U32[1], value, ConstU32(offset), ConstU32(8U));
-        Name(buffer.offset, fmt::format("buf{}_off", binding));
-        buffer.offset_dwords = OpShiftRightLogical(U32[1], buffer.offset, ConstU32(2U));
-        Name(buffer.offset_dwords, fmt::format("buf{}_dword_off", binding));
 
-        // Only need to load size if performing bounds checks and the buffer is both guest and not
-        // inline.
-        if (!profile.supports_robust_buffer_access && buffer.buffer_type == BufferType::Guest) {
-            const BufferResource& desc = info.buffers[i];
-            if (desc.sharp_idx == std::numeric_limits<u32>::max()) {
-                buffer.size = ConstU32(desc.inline_cbuf.GetSize());
-            } else {
-                buffer.size = GetBufferSize(desc.sharp_idx);
+        // Only load and apply buffer offsets if host GPU alignment is larger than guest.
+        if (profile.needs_buffer_offsets) {
+            const u32 half = PushData::BufOffsetIndex + (binding >> 4);
+            const u32 comp = (binding & 0xf) >> 2;
+            const u32 offset = (binding & 0x3) << 3;
+            const Id ptr{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
+                                       push_data_block, ConstU32(half), ConstU32(comp))};
+            const Id value{OpLoad(U32[1], ptr)};
+
+            const Id buf_offset{OpBitFieldUExtract(U32[1], value, ConstU32(offset), ConstU32(8U))};
+            Name(buf_offset, fmt::format("buf{}_off", binding));
+            buffer.Offset(PointerSize::B8) = buf_offset;
+
+            if (True(desc.used_types & IR::Type::U16)) {
+                const Id buf_word_offset{OpShiftRightLogical(U32[1], buf_offset, ConstU32(1U))};
+                Name(buf_word_offset, fmt::format("buf{}_word_off", binding));
+                buffer.Offset(PointerSize::B16) = buf_word_offset;
             }
-            Name(buffer.size, fmt::format("buf{}_size", binding));
-            buffer.size_shorts = OpShiftRightLogical(U32[1], buffer.size, ConstU32(1U));
-            Name(buffer.size_shorts, fmt::format("buf{}_short_size", binding));
-            buffer.size_dwords = OpShiftRightLogical(U32[1], buffer.size, ConstU32(2U));
-            Name(buffer.size_dwords, fmt::format("buf{}_dword_size", binding));
+            if (True(desc.used_types & IR::Type::U32)) {
+                const Id buf_dword_offset{OpShiftRightLogical(U32[1], buf_offset, ConstU32(2U))};
+                Name(buf_dword_offset, fmt::format("buf{}_dword_off", binding));
+                buffer.Offset(PointerSize::B32) = buf_dword_offset;
+            }
+            if (True(desc.used_types & IR::Type::U64)) {
+                const Id buf_qword_offset{OpShiftRightLogical(U32[1], buf_offset, ConstU32(3U))};
+                Name(buf_qword_offset, fmt::format("buf{}_qword_off", binding));
+                buffer.Offset(PointerSize::B64) = buf_qword_offset;
+            }
+        }
+
+        // Only load size if performing bounds checks.
+        if (!profile.supports_robust_buffer_access) {
+            const Id buf_size{desc.sharp_idx == std::numeric_limits<u32>::max()
+                                  ? ConstU32(desc.inline_cbuf.GetSize())
+                                  : GetBufferSize(desc.sharp_idx)};
+            Name(buf_size, fmt::format("buf{}_size", binding));
+            buffer.Size(PointerSize::B8) = buf_size;
+
+            if (True(desc.used_types & IR::Type::U16)) {
+                const Id buf_word_size{OpShiftRightLogical(U32[1], buf_size, ConstU32(1U))};
+                Name(buf_word_size, fmt::format("buf{}_short_size", binding));
+                buffer.Size(PointerSize::B16) = buf_word_size;
+            }
+            if (True(desc.used_types & IR::Type::U32)) {
+                const Id buf_dword_size{OpShiftRightLogical(U32[1], buf_size, ConstU32(2U))};
+                Name(buf_dword_size, fmt::format("buf{}_dword_size", binding));
+                buffer.Size(PointerSize::B32) = buf_dword_size;
+            }
+            if (True(desc.used_types & IR::Type::U64)) {
+                const Id buf_qword_size{OpShiftRightLogical(U32[1], buf_size, ConstU32(3U))};
+                Name(buf_qword_size, fmt::format("buf{}_qword_size", binding));
+                buffer.Size(PointerSize::B64) = buf_qword_size;
+            }
         }
     }
 }
@@ -255,8 +304,7 @@ void EmitContext::DefineInterpolatedAttribs() {
     // Iterate all input attributes, load them and manually interpolate.
     for (s32 i = 0; i < runtime_info.fs_info.num_inputs; i++) {
         const auto& input = runtime_info.fs_info.inputs[i];
-        const u32 semantic = input.param_index;
-        auto& params = input_params[semantic];
+        auto& params = input_params[i];
         if (input.is_flat || params.is_loaded) {
             continue;
         }
@@ -266,13 +314,15 @@ void EmitContext::DefineInterpolatedAttribs() {
         const Id p2{OpCompositeExtract(F32[4], p_array, 2U)};
         const Id p10{OpFSub(F32[4], p1, p0)};
         const Id p20{OpFSub(F32[4], p2, p0)};
-        const Id bary_coord{OpLoad(F32[3], gl_bary_coord_id)};
+        const Id bary_coord{OpLoad(F32[3], IsLinear(info.interp_qualifiers[i])
+                                               ? bary_coord_linear_id
+                                               : bary_coord_persp_id)};
         const Id bary_coord_y{OpCompositeExtract(F32[1], bary_coord, 1)};
         const Id bary_coord_z{OpCompositeExtract(F32[1], bary_coord, 2)};
         const Id p10_y{OpVectorTimesScalar(F32[4], p10, bary_coord_y)};
         const Id p20_z{OpVectorTimesScalar(F32[4], p20, bary_coord_z)};
         params.id = OpFAdd(F32[4], p0, OpFAdd(F32[4], p10_y, p20_z));
-        Name(params.id, fmt::format("fs_in_attr{}", semantic));
+        Name(params.id, fmt::format("fs_in_attr{}", i));
         params.is_loaded = true;
     }
 }
@@ -370,35 +420,47 @@ void EmitContext::DefineInputs() {
                 DefineVariable(U1[1], spv::BuiltIn::FrontFacing, spv::StorageClass::Input);
         }
         if (profile.needs_manual_interpolation) {
-            gl_bary_coord_id =
-                DefineVariable(F32[3], spv::BuiltIn::BaryCoordKHR, spv::StorageClass::Input);
+            if (info.has_perspective_interp) {
+                bary_coord_persp_id =
+                    DefineVariable(F32[3], spv::BuiltIn::BaryCoordKHR, spv::StorageClass::Input);
+            }
+            if (info.has_linear_interp) {
+                bary_coord_linear_id = DefineVariable(F32[3], spv::BuiltIn::BaryCoordNoPerspKHR,
+                                                      spv::StorageClass::Input);
+            }
         }
         for (s32 i = 0; i < runtime_info.fs_info.num_inputs; i++) {
             const auto& input = runtime_info.fs_info.inputs[i];
-            const u32 semantic = input.param_index;
-            ASSERT(semantic < IR::NumParams);
             if (input.IsDefault()) {
-                input_params[semantic] = {
-                    MakeDefaultValue(*this, input.default_value), input_f32, F32[1], 4, false, true,
+                input_params[i] = {
+                    .id = MakeDefaultValue(*this, input.default_value),
+                    .pointer_type = input_f32,
+                    .component_type = F32[1],
+                    .num_components = 4,
+                    .is_integer = false,
+                    .is_loaded = true,
                 };
                 continue;
             }
-            const IR::Attribute param{IR::Attribute::Param0 + input.param_index};
+            const IR::Attribute param{IR::Attribute::Param0 + i};
             const u32 num_components = info.loads.NumComponents(param);
             const Id type{F32[num_components]};
             Id attr_id{};
             if (profile.needs_manual_interpolation && !input.is_flat) {
-                attr_id = DefineInput(TypeArray(type, ConstU32(3U)), semantic);
+                attr_id = DefineInput(TypeArray(type, ConstU32(3U)), input.param_index);
                 Decorate(attr_id, spv::Decoration::PerVertexKHR);
-                Name(attr_id, fmt::format("fs_in_attr{}_p", semantic));
+                Name(attr_id, fmt::format("fs_in_attr{}_p", i));
             } else {
-                attr_id = DefineInput(type, semantic);
-                Name(attr_id, fmt::format("fs_in_attr{}", semantic));
+                attr_id = DefineInput(type, input.param_index);
+                Name(attr_id, fmt::format("fs_in_attr{}", i));
+
+                if (input.is_flat) {
+                    Decorate(attr_id, spv::Decoration::Flat);
+                } else if (IsLinear(info.interp_qualifiers[i])) {
+                    Decorate(attr_id, spv::Decoration::NoPerspective);
+                }
             }
-            if (input.is_flat) {
-                Decorate(attr_id, spv::Decoration::Flat);
-            }
-            input_params[semantic] =
+            input_params[i] =
                 GetAttributeInfo(AmdGpu::NumberFormat::Float, attr_id, num_components, false);
         }
         break;
@@ -593,7 +655,8 @@ void EmitContext::DefineOutputs() {
         }
         break;
     }
-    case LogicalStage::Fragment:
+    case LogicalStage::Fragment: {
+        u32 num_render_targets = 0;
         for (u32 i = 0; i < IR::NumRenderTargets; i++) {
             const IR::Attribute mrt{IR::Attribute::RenderTarget0 + i};
             if (!info.stores.GetAny(mrt)) {
@@ -602,11 +665,21 @@ void EmitContext::DefineOutputs() {
             const u32 num_components = info.stores.NumComponents(mrt);
             const AmdGpu::NumberFormat num_format{runtime_info.fs_info.color_buffers[i].num_format};
             const Id type{GetAttributeType(*this, num_format)[num_components]};
-            const Id id{DefineOutput(type, i)};
+            Id id;
+            if (runtime_info.fs_info.dual_source_blending) {
+                id = DefineOutput(type, 0);
+                Decorate(id, spv::Decoration::Index, i);
+            } else {
+                id = DefineOutput(type, i);
+            }
             Name(id, fmt::format("frag_color{}", i));
             frag_outputs[i] = GetAttributeInfo(num_format, id, num_components, true);
+            ++num_render_targets;
         }
+        ASSERT_MSG(!runtime_info.fs_info.dual_source_blending || num_render_targets == 2,
+                   "Dual source blending enabled, there must be exactly two MRT exports");
         break;
+    }
     case LogicalStage::Geometry: {
         output_position = DefineVariable(F32[4], spv::BuiltIn::Position, spv::StorageClass::Output);
 
@@ -690,8 +763,14 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_writte
     case Shader::BufferType::GdsBuffer:
         Name(id, "gds_buffer");
         break;
-    case Shader::BufferType::ReadConstUbo:
-        Name(id, "srt_flatbuf_ubo");
+    case Shader::BufferType::Flatbuf:
+        Name(id, "srt_flatbuf");
+        break;
+    case Shader::BufferType::BdaPagetable:
+        Name(id, "bda_pagetable");
+        break;
+    case Shader::BufferType::FaultBuffer:
+        Name(id, "fault_buffer");
         break;
     case Shader::BufferType::SharedMemory:
         Name(id, "ssbo_shmem");
@@ -705,35 +784,39 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_storage, bool is_writte
 };
 
 void EmitContext::DefineBuffers() {
-    if (!profile.supports_robust_buffer_access && !info.has_readconst) {
-        // In case ReadConstUbo has not already been bound by IR and is needed
-        // to query buffer sizes, bind it now.
-        info.buffers.push_back({
-            .used_types = IR::Type::U32,
-            .inline_cbuf = AmdGpu::Buffer::Null(),
-            .buffer_type = BufferType::ReadConstUbo,
-        });
-    }
     for (const auto& desc : info.buffers) {
         const auto buf_sharp = desc.GetSharp(info);
         const bool is_storage = desc.IsStorage(buf_sharp, profile);
 
+        // Set indexes for special buffers.
+        if (desc.buffer_type == BufferType::Flatbuf) {
+            flatbuf_index = buffers.size();
+        } else if (desc.buffer_type == BufferType::BdaPagetable) {
+            bda_pagetable_index = buffers.size();
+        } else if (desc.buffer_type == BufferType::FaultBuffer) {
+            fault_buffer_index = buffers.size();
+        }
+
         // Define aliases depending on the shader usage.
         auto& spv_buffer = buffers.emplace_back(binding.buffer++, desc.buffer_type);
+        if (True(desc.used_types & IR::Type::U64)) {
+            spv_buffer.Alias(PointerType::U64) =
+                DefineBuffer(is_storage, desc.is_written, 3, desc.buffer_type, U64);
+        }
         if (True(desc.used_types & IR::Type::U32)) {
-            spv_buffer[BufferAlias::U32] =
+            spv_buffer.Alias(PointerType::U32) =
                 DefineBuffer(is_storage, desc.is_written, 2, desc.buffer_type, U32[1]);
         }
         if (True(desc.used_types & IR::Type::F32)) {
-            spv_buffer[BufferAlias::F32] =
+            spv_buffer.Alias(PointerType::F32) =
                 DefineBuffer(is_storage, desc.is_written, 2, desc.buffer_type, F32[1]);
         }
         if (True(desc.used_types & IR::Type::U16)) {
-            spv_buffer[BufferAlias::U16] =
+            spv_buffer.Alias(PointerType::U16) =
                 DefineBuffer(is_storage, desc.is_written, 1, desc.buffer_type, U16);
         }
         if (True(desc.used_types & IR::Type::U8)) {
-            spv_buffer[BufferAlias::U8] =
+            spv_buffer.Alias(PointerType::U8) =
                 DefineBuffer(is_storage, desc.is_written, 0, desc.buffer_type, U8);
         }
         ++binding.unified;
@@ -869,6 +952,7 @@ void EmitContext::DefineImagesAndSamplers() {
     }
     if (std::ranges::any_of(info.images, &ImageResource::is_atomic)) {
         image_u32 = TypePointer(spv::StorageClass::Image, U32[1]);
+        image_f32 = TypePointer(spv::StorageClass::Image, F32[1]);
     }
     if (info.samplers.empty()) {
         return;
@@ -879,25 +963,65 @@ void EmitContext::DefineImagesAndSamplers() {
         const Id id{AddGlobalVariable(sampler_pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding.unified++);
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
-        Name(id, fmt::format("{}_{}{}", stage, "samp", samp_desc.sharp_idx));
+        auto sharp_desc = std::holds_alternative<u32>(samp_desc.sampler)
+                              ? fmt::format("sgpr:{}", std::get<u32>(samp_desc.sampler))
+                              : fmt::format("inline:{:#x}:{:#x}",
+                                            std::get<AmdGpu::Sampler>(samp_desc.sampler).raw0,
+                                            std::get<AmdGpu::Sampler>(samp_desc.sampler).raw1);
+        Name(id, fmt::format("{}_{}{}", stage, "samp", sharp_desc));
         samplers.push_back(id);
         interfaces.push_back(id);
     }
 }
 
 void EmitContext::DefineSharedMemory() {
-    if (!info.uses_shared) {
+    const auto num_types = std::popcount(static_cast<u32>(info.shared_types));
+    if (num_types == 0) {
         return;
     }
     ASSERT(info.stage == Stage::Compute);
     const u32 shared_memory_size = runtime_info.cs_info.shared_memory_size;
-    const u32 num_elements{Common::DivCeil(shared_memory_size, 4U)};
-    const Id type{TypeArray(U32[1], ConstU32(num_elements))};
-    shared_memory_u32_type = TypePointer(spv::StorageClass::Workgroup, type);
-    shared_u32 = TypePointer(spv::StorageClass::Workgroup, U32[1]);
-    shared_memory_u32 = AddGlobalVariable(shared_memory_u32_type, spv::StorageClass::Workgroup);
-    Name(shared_memory_u32, "shared_mem");
-    interfaces.push_back(shared_memory_u32);
+
+    const auto make_type = [&](IR::Type type, Id element_type, u32 element_size,
+                               std::string_view name) {
+        if (False(info.shared_types & type)) {
+            // Skip unused shared memory types.
+            return std::make_tuple(Id{}, Id{}, Id{});
+        }
+
+        const u32 num_elements{Common::DivCeil(shared_memory_size, element_size)};
+        const Id array_type{TypeArray(element_type, ConstU32(num_elements))};
+
+        const auto mem_type = [&] {
+            if (num_types > 1) {
+                const Id struct_type{TypeStruct(array_type)};
+                Decorate(struct_type, spv::Decoration::Block);
+                MemberDecorate(struct_type, 0u, spv::Decoration::Offset, 0u);
+                return struct_type;
+            } else {
+                return array_type;
+            }
+        }();
+
+        const Id pointer = TypePointer(spv::StorageClass::Workgroup, mem_type);
+        const Id element_pointer = TypePointer(spv::StorageClass::Workgroup, element_type);
+        const Id variable = AddGlobalVariable(pointer, spv::StorageClass::Workgroup);
+        Name(variable, name);
+        interfaces.push_back(variable);
+
+        if (num_types > 1) {
+            Decorate(array_type, spv::Decoration::ArrayStride, element_size);
+            Decorate(variable, spv::Decoration::Aliased);
+        }
+
+        return std::make_tuple(variable, element_pointer, pointer);
+    };
+    std::tie(shared_memory_u16, shared_u16, shared_memory_u16_type) =
+        make_type(IR::Type::U16, U16, 2u, "shared_mem_u16");
+    std::tie(shared_memory_u32, shared_u32, shared_memory_u32_type) =
+        make_type(IR::Type::U32, U32[1], 4u, "shared_mem_u32");
+    std::tie(shared_memory_u64, shared_u64, shared_memory_u64_type) =
+        make_type(IR::Type::U64, U64, 8u, "shared_mem_u64");
 }
 
 Id EmitContext::DefineFloat32ToUfloatM5(u32 mantissa_bits, const std::string_view name) {
@@ -1002,6 +1126,95 @@ Id EmitContext::DefineUfloatM5ToFloat32(u32 mantissa_bits, const std::string_vie
     return func;
 }
 
+Id EmitContext::DefineGetBdaPointer() {
+    const auto caching_pagebits{
+        Constant(U64, static_cast<u64>(VideoCore::BufferCache::CACHING_PAGEBITS))};
+    const auto caching_pagemask{Constant(U64, VideoCore::BufferCache::CACHING_PAGESIZE - 1)};
+
+    const auto func_type{TypeFunction(U64, U64)};
+    const auto func{OpFunction(U64, spv::FunctionControlMask::MaskNone, func_type)};
+    const auto address{OpFunctionParameter(U64)};
+    Name(func, "get_bda_pointer");
+    AddLabel();
+
+    const auto fault_label{OpLabel()};
+    const auto available_label{OpLabel()};
+    const auto merge_label{OpLabel()};
+
+    // Get page BDA
+    const auto page{OpShiftRightLogical(U64, address, caching_pagebits)};
+    const auto page32{OpUConvert(U32[1], page)};
+    const auto& bda_buffer{buffers[bda_pagetable_index]};
+    const auto [bda_buffer_id, bda_pointer_type] = bda_buffer.Alias(PointerType::U64);
+    const auto bda_ptr{OpAccessChain(bda_pointer_type, bda_buffer_id, u32_zero_value, page32)};
+    const auto bda{OpLoad(U64, bda_ptr)};
+
+    // Check if page is GPU cached
+    const auto is_fault{OpIEqual(U1[1], bda, u64_zero_value)};
+    OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(is_fault, fault_label, available_label);
+
+    // First time acces, mark as fault
+    AddLabel(fault_label);
+    const auto& fault_buffer{buffers[fault_buffer_index]};
+    const auto [fault_buffer_id, fault_pointer_type] = fault_buffer.Alias(PointerType::U32);
+    const auto page_div32{OpShiftRightLogical(U32[1], page32, ConstU32(5U))};
+    const auto page_mod32{OpBitwiseAnd(U32[1], page32, ConstU32(31U))};
+    const auto page_mask{OpShiftLeftLogical(U32[1], u32_one_value, page_mod32)};
+    const auto fault_ptr{
+        OpAccessChain(fault_pointer_type, fault_buffer_id, u32_zero_value, page_div32)};
+    const auto fault_value{OpLoad(U32[1], fault_ptr)};
+    const auto fault_value_masked{OpBitwiseOr(U32[1], fault_value, page_mask)};
+    OpStore(fault_ptr, fault_value_masked);
+
+    // Return null pointer
+    const auto fallback_result{u64_zero_value};
+    OpBranch(merge_label);
+
+    // Value is available, compute address
+    AddLabel(available_label);
+    const auto offset_in_bda{OpBitwiseAnd(U64, address, caching_pagemask)};
+    const auto addr{OpIAdd(U64, bda, offset_in_bda)};
+    OpBranch(merge_label);
+
+    // Merge
+    AddLabel(merge_label);
+    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    OpReturnValue(result);
+    OpFunctionEnd();
+    return func;
+}
+
+Id EmitContext::DefineReadConst(bool dynamic) {
+    const auto func_type{!dynamic ? TypeFunction(U32[1], U32[2], U32[1], U32[1])
+                                  : TypeFunction(U32[1], U32[2], U32[1])};
+    const auto func{OpFunction(U32[1], spv::FunctionControlMask::MaskNone, func_type)};
+    const auto base{OpFunctionParameter(U32[2])};
+    const auto offset{OpFunctionParameter(U32[1])};
+    const auto flatbuf_offset{!dynamic ? OpFunctionParameter(U32[1]) : Id{}};
+    Name(func, dynamic ? "read_const_dynamic" : "read_const");
+    AddLabel();
+
+    const auto base_lo{OpUConvert(U64, OpCompositeExtract(U32[1], base, 0))};
+    const auto base_hi{OpUConvert(U64, OpCompositeExtract(U32[1], base, 1))};
+    const auto base_shift{OpShiftLeftLogical(U64, base_hi, ConstU32(32U))};
+    const auto base_addr{OpBitwiseOr(U64, base_lo, base_shift)};
+    const auto offset_bytes{OpShiftLeftLogical(U32[1], offset, ConstU32(2U))};
+    const auto addr{OpIAdd(U64, base_addr, OpUConvert(U64, offset_bytes))};
+
+    const auto result = EmitDwordMemoryRead(addr, [&]() {
+        if (dynamic) {
+            return u32_zero_value;
+        } else {
+            return EmitFlatbufferLoad(flatbuf_offset);
+        }
+    });
+
+    OpReturnValue(result);
+    OpFunctionEnd();
+    return func;
+}
+
 void EmitContext::DefineFunctions() {
     if (info.uses_pack_10_11_11) {
         f32_to_uf11 = DefineFloat32ToUfloatM5(6, "f32_to_uf11");
@@ -1010,6 +1223,18 @@ void EmitContext::DefineFunctions() {
     if (info.uses_unpack_10_11_11) {
         uf11_to_f32 = DefineUfloatM5ToFloat32(6, "uf11_to_f32");
         uf10_to_f32 = DefineUfloatM5ToFloat32(5, "uf10_to_f32");
+    }
+    if (info.uses_dma) {
+        get_bda_pointer = DefineGetBdaPointer();
+    }
+
+    if (True(info.readconst_types & Info::ReadConstType::Immediate)) {
+        LOG_DEBUG(Render_Recompiler, "Shader {:#x} uses immediate ReadConst", info.pgm_hash);
+        read_const = DefineReadConst(false);
+    }
+    if (True(info.readconst_types & Info::ReadConstType::Dynamic)) {
+        LOG_DEBUG(Render_Recompiler, "Shader {:#x} uses dynamic ReadConst", info.pgm_hash);
+        read_const_dynamic = DefineReadConst(true);
     }
 }
 
