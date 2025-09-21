@@ -54,21 +54,27 @@ Id SharedAtomicU64(EmitContext& ctx, Id offset, Id value,
     });
 }
 
+Id SharedAtomicU64IncDec(EmitContext& ctx, Id offset,
+                         Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id)) {
+    const Id shift_id{ctx.ConstU32(3U)};
+    const Id index{ctx.OpShiftRightLogical(ctx.U32[1], offset, shift_id)};
+    const u32 num_elements{Common::DivCeil(ctx.runtime_info.cs_info.shared_memory_size, 8u)};
+    const Id pointer{ctx.EmitSharedMemoryAccess(ctx.shared_u64, ctx.shared_memory_u64, index)};
+    const auto [scope, semantics]{AtomicArgs(ctx)};
+    return AccessBoundsCheck<64>(ctx, index, ctx.ConstU32(num_elements), [&] {
+        return (ctx.*atomic_func)(ctx.U64, pointer, scope, semantics);
+    });
+}
+
 template <bool is_float = false>
 Id BufferAtomicU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value,
                    Id (Sirit::Module::*atomic_func)(Id, Id, Id, Id, Id)) {
     const auto& buffer = ctx.buffers[handle];
-    const auto type = [&] {
-        if constexpr (is_float) {
-            return ctx.F32[1];
-        } else {
-            return ctx.U32[1];
-        }
-    }();
+    const Id type = is_float ? ctx.F32[1] : ctx.U32[1];
     if (const Id offset = buffer.Offset(PointerSize::B32); Sirit::ValidId(offset)) {
         address = ctx.OpIAdd(ctx.U32[1], address, offset);
     }
-    const auto [id, pointer_type] = buffer.Alias(PointerType::U32);
+    const auto [id, pointer_type] = buffer.Alias(is_float ? PointerType::F32 : PointerType::U32);
     const Id ptr = ctx.OpAccessChain(pointer_type, id, ctx.u32_zero_value, address);
     const auto [scope, semantics]{AtomicArgs(ctx)};
     return AccessBoundsCheck<32, 1, is_float>(ctx, address, buffer.Size(PointerSize::B32), [&] {
@@ -148,40 +154,80 @@ Id EmitSharedAtomicUMax32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicUMax);
 }
 
+Id EmitSharedAtomicUMax64(EmitContext& ctx, Id offset, Id value) {
+    return SharedAtomicU64(ctx, offset, value, &Sirit::Module::OpAtomicUMax);
+}
+
 Id EmitSharedAtomicSMax32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicSMax);
+}
+
+Id EmitSharedAtomicSMax64(EmitContext& ctx, Id offset, Id value) {
+    return SharedAtomicU64(ctx, offset, value, &Sirit::Module::OpAtomicSMax);
 }
 
 Id EmitSharedAtomicUMin32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicUMin);
 }
 
+Id EmitSharedAtomicUMin64(EmitContext& ctx, Id offset, Id value) {
+    return SharedAtomicU64(ctx, offset, value, &Sirit::Module::OpAtomicUMin);
+}
+
 Id EmitSharedAtomicSMin32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicSMin);
+}
+
+Id EmitSharedAtomicSMin64(EmitContext& ctx, Id offset, Id value) {
+    return SharedAtomicU64(ctx, offset, value, &Sirit::Module::OpAtomicSMin);
 }
 
 Id EmitSharedAtomicAnd32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicAnd);
 }
 
+Id EmitSharedAtomicAnd64(EmitContext& ctx, Id offset, Id value) {
+    return SharedAtomicU64(ctx, offset, value, &Sirit::Module::OpAtomicAnd);
+}
+
 Id EmitSharedAtomicOr32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicOr);
+}
+
+Id EmitSharedAtomicOr64(EmitContext& ctx, Id offset, Id value) {
+    return SharedAtomicU64(ctx, offset, value, &Sirit::Module::OpAtomicOr);
 }
 
 Id EmitSharedAtomicXor32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicXor);
 }
 
+Id EmitSharedAtomicXor64(EmitContext& ctx, Id offset, Id value) {
+    return SharedAtomicU64(ctx, offset, value, &Sirit::Module::OpAtomicXor);
+}
+
 Id EmitSharedAtomicISub32(EmitContext& ctx, Id offset, Id value) {
     return SharedAtomicU32(ctx, offset, value, &Sirit::Module::OpAtomicISub);
+}
+
+Id EmitSharedAtomicISub64(EmitContext& ctx, Id offset, Id value) {
+    return SharedAtomicU64(ctx, offset, value, &Sirit::Module::OpAtomicISub);
 }
 
 Id EmitSharedAtomicInc32(EmitContext& ctx, Id offset) {
     return SharedAtomicU32IncDec(ctx, offset, &Sirit::Module::OpAtomicIIncrement);
 }
 
+Id EmitSharedAtomicInc64(EmitContext& ctx, Id offset) {
+    return SharedAtomicU64IncDec(ctx, offset, &Sirit::Module::OpAtomicIIncrement);
+}
+
 Id EmitSharedAtomicDec32(EmitContext& ctx, Id offset) {
     return SharedAtomicU32IncDec(ctx, offset, &Sirit::Module::OpAtomicIDecrement);
+}
+
+Id EmitSharedAtomicDec64(EmitContext& ctx, Id offset) {
+    return SharedAtomicU64IncDec(ctx, offset, &Sirit::Module::OpAtomicIDecrement);
 }
 
 Id EmitBufferAtomicIAdd32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address, Id value) {
@@ -222,6 +268,7 @@ Id EmitBufferAtomicFMin32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id addre
     const auto sign_bit_set =
         ctx.OpBitFieldUExtract(ctx.U32[1], u32_value, ctx.ConstU32(31u), ctx.ConstU32(1u));
 
+    // FIXME this needs control flow because it currently executes both atomics
     const auto result = ctx.OpSelect(
         ctx.F32[1], sign_bit_set,
         EmitBitCastF32U32(ctx, EmitBufferAtomicUMax32(ctx, inst, handle, address, u32_value)),
@@ -256,6 +303,7 @@ Id EmitBufferAtomicFMax32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id addre
     const auto sign_bit_set =
         ctx.OpBitFieldUExtract(ctx.U32[1], u32_value, ctx.ConstU32(31u), ctx.ConstU32(1u));
 
+    // FIXME this needs control flow because it currently executes both atomics
     const auto result = ctx.OpSelect(
         ctx.F32[1], sign_bit_set,
         EmitBitCastF32U32(ctx, EmitBufferAtomicUMin32(ctx, inst, handle, address, u32_value)),

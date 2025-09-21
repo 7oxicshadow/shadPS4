@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/alignment.h"
@@ -13,11 +13,13 @@
 #include "core/aerolib/aerolib.h"
 #include "core/aerolib/stubs.h"
 #include "core/devtools/widget/module_list.h"
+#include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/memory.h"
 #include "core/libraries/kernel/threads.h"
 #include "core/linker.h"
 #include "core/memory.h"
 #include "core/tls.h"
+#include "ipc/ipc.h"
 
 namespace Core {
 
@@ -115,6 +117,10 @@ void Linker::Execute(const std::vector<std::string> args) {
 
     main_thread.Run([this, module, args](std::stop_token) {
         Common::SetCurrentThreadName("GAME_MainThread");
+        if (auto& ipc = IPC::Instance()) {
+            ipc.WaitForStart();
+        }
+
         LoadSharedLibraries();
 
         // Simulate libSceGnmDriver initialization, which maps a chunk of direct memory.
@@ -130,7 +136,7 @@ void Linker::Execute(const std::vector<std::string> args) {
         ASSERT_MSG(result == 0, "Unable to emulate libSceGnmDriver initialization");
 
         // Start main module.
-        EntryParams params{};
+        EntryParams& params = Libraries::Kernel::entry_params;
         params.argc = 1;
         params.argv[0] = "eboot.bin";
         if (!args.empty()) {
@@ -327,8 +333,6 @@ bool Linker::Resolve(const std::string& name, Loader::SymbolType sym_type, Modul
     sr.library = library->name;
     sr.library_version = library->version;
     sr.module = module->name;
-    sr.module_version_major = module->version_major;
-    sr.module_version_minor = module->version_minor;
     sr.type = sym_type;
 
     const auto* record = m_hle_symbols.FindSymbol(sr);

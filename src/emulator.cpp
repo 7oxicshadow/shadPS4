@@ -1,9 +1,12 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <filesystem>
+#include <fstream>
 #include <set>
+#include <sstream>
 #include <fmt/core.h>
+#include <hwinfo/hwinfo.h>
 
 #include "common/config.h"
 #include "common/debug.h"
@@ -34,7 +37,7 @@
 #include "core/libraries/libc_internal/libc_internal.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/ngs2/ngs2.h"
-#include "core/libraries/np_trophy/np_trophy.h"
+#include "core/libraries/np/np_trophy.h"
 #include "core/libraries/rtc/rtc.h"
 #include "core/libraries/save_data/save_backup.h"
 #include "core/linker.h"
@@ -99,9 +102,12 @@ void Emulator::Run(std::filesystem::path file, const std::vector<std::string> ar
         ASSERT_MSG(param_sfo->Open(param_sfo_path), "Failed to open param.sfo");
 
         const auto content_id = param_sfo->GetString("CONTENT_ID");
-        ASSERT_MSG(content_id.has_value(), "Failed to get CONTENT_ID");
-
-        id = std::string(*content_id, 7, 9);
+        const auto title_id = param_sfo->GetString("TITLE_ID");
+        if (content_id.has_value() && !content_id->empty()) {
+            id = std::string(*content_id, 7, 9);
+        } else if (title_id.has_value()) {
+            id = *title_id;
+        }
         title = param_sfo->GetString("TITLE").value_or("Unknown title");
         fw_version = param_sfo->GetInteger("SYSTEM_VER").value_or(0x4700000);
         app_version = param_sfo->GetString("APP_VER").value_or("Unknown version");
@@ -109,6 +115,9 @@ void Emulator::Run(std::filesystem::path file, const std::vector<std::string> ar
             psf_attributes.raw = *raw_attributes;
         }
     }
+
+    Config::load(Common::FS::GetUserPath(Common::FS::PathType::CustomConfigs) / (id + ".toml"),
+                 true);
 
     // Initialize logging as soon as possible
     if (!id.empty() && Config::getSeparateLogFilesEnabled()) {
@@ -129,13 +138,22 @@ void Emulator::Run(std::filesystem::path file, const std::vector<std::string> ar
     LOG_INFO(Loader, "Description {}", Common::g_scm_desc);
     LOG_INFO(Loader, "Remote {}", Common::g_scm_remote_url);
 
+    const bool has_game_config = std::filesystem::exists(
+        Common::FS::GetUserPath(Common::FS::PathType::CustomConfigs) / (id + ".toml"));
+    LOG_INFO(Config, "Game-specific config exists: {}", has_game_config);
+
     LOG_INFO(Config, "General LogType: {}", Config::getLogType());
     LOG_INFO(Config, "General isNeo: {}", Config::isNeoModeConsole());
+    LOG_INFO(Config, "General isDevKit: {}", Config::isDevKitConsole());
+    LOG_INFO(Config, "General isConnectedToNetwork: {}", Config::getIsConnectedToNetwork());
+    LOG_INFO(Config, "General isPsnSignedIn: {}", Config::getPSNSignedIn());
     LOG_INFO(Config, "GPU isNullGpu: {}", Config::nullGpu());
     LOG_INFO(Config, "GPU readbacks: {}", Config::readbacks());
+    LOG_INFO(Config, "GPU readbackLinearImages: {}", Config::readbackLinearImages());
     LOG_INFO(Config, "GPU directMemoryAccess: {}", Config::directMemoryAccess());
     LOG_INFO(Config, "GPU shouldDumpShaders: {}", Config::dumpShaders());
-    LOG_INFO(Config, "GPU vblankDivider: {}", Config::vblankDiv());
+    LOG_INFO(Config, "GPU vblankFrequency: {}", Config::vblankFreq());
+    LOG_INFO(Config, "GPU shouldCopyGPUBuffers: {}", Config::copyGPUCmdBuffers());
     LOG_INFO(Config, "Vulkan gpuId: {}", Config::getGpuId());
     LOG_INFO(Config, "Vulkan vkValidation: {}", Config::vkValidationEnabled());
     LOG_INFO(Config, "Vulkan vkValidationSync: {}", Config::vkValidationSyncEnabled());
@@ -145,9 +163,22 @@ void Emulator::Run(std::filesystem::path file, const std::vector<std::string> ar
     LOG_INFO(Config, "Vulkan guestMarkers: {}", Config::getVkGuestMarkersEnabled());
     LOG_INFO(Config, "Vulkan rdocEnable: {}", Config::isRdocEnabled());
 
+    hwinfo::Memory ram;
+    hwinfo::OS os;
+    const auto cpus = hwinfo::getAllCPUs();
+    for (const auto& cpu : cpus) {
+        LOG_INFO(Config, "CPU Model: {}", cpu.modelName());
+        LOG_INFO(Config, "CPU Physical Cores: {}, Logical Cores: {}", cpu.numPhysicalCores(),
+                 cpu.numLogicalCores());
+    }
+    LOG_INFO(Config, "Total RAM: {} GB", std::round(ram.total_Bytes() / pow(1024, 3)));
+    LOG_INFO(Config, "Operating System: {}", os.name());
+
     if (param_sfo_exists) {
         LOG_INFO(Loader, "Game id: {} Title: {}", id, title);
         LOG_INFO(Loader, "Fw: {:#x} App Version: {}", fw_version, app_version);
+        LOG_INFO(Loader, "PSVR Supported: {}", (bool)psf_attributes.support_ps_vr.Value());
+        LOG_INFO(Loader, "PSVR Required: {}", (bool)psf_attributes.require_ps_vr.Value());
     }
     if (!args.empty()) {
         const auto argc = std::min<size_t>(args.size(), 32);
@@ -173,7 +204,7 @@ void Emulator::Run(std::filesystem::path file, const std::vector<std::string> ar
     // Initialize patcher and trophies
     if (!id.empty()) {
         MemoryPatcher::g_game_serial = id;
-        Libraries::NpTrophy::game_serial = id;
+        Libraries::Np::NpTrophy::game_serial = id;
 
         const auto trophyDir =
             Common::FS::GetUserPath(Common::FS::PathType::MetaDataDir) / id / "TrophyFiles";
@@ -222,7 +253,7 @@ void Emulator::Run(std::filesystem::path file, const std::vector<std::string> ar
         }
     }
     window = std::make_unique<Frontend::WindowSDL>(
-        Config::getScreenWidth(), Config::getScreenHeight(), controller, window_title);
+        Config::getWindowWidth(), Config::getWindowHeight(), controller, window_title);
 
     g_window = window.get();
 
@@ -291,19 +322,15 @@ void Emulator::Run(std::filesystem::path file, const std::vector<std::string> ar
     // Start the timer (Play Time)
 #ifdef ENABLE_QT_GUI
     if (!id.empty()) {
-        auto* timer = new QTimer();
-        QObject::connect(timer, &QTimer::timeout, [this, id]() {
-            UpdatePlayTime(id);
-            start_time = std::chrono::steady_clock::now();
-        });
-        timer->start(60000); // 60000 ms = 1 minute
-
         start_time = std::chrono::steady_clock::now();
-        const auto user_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
-        QString filePath = QString::fromStdString((user_dir / "play_time.txt").string());
-        QFile file(filePath);
-        ASSERT_MSG(file.open(QIODevice::ReadWrite | QIODevice::Text),
-                   "Error opening or creating play_time.txt");
+
+        std::thread([this, id]() {
+            while (true) {
+                std::this_thread::sleep_for(std::chrono::seconds(60));
+                UpdatePlayTime(id);
+                start_time = std::chrono::steady_clock::now();
+            }
+        }).detach();
     }
 #endif
 
@@ -322,17 +349,16 @@ void Emulator::Run(std::filesystem::path file, const std::vector<std::string> ar
 }
 
 void Emulator::LoadSystemModules(const std::string& game_serial) {
-    constexpr std::array<SysModules, 10> ModulesToLoad{
-        {{"libSceNgs2.sprx", &Libraries::Ngs2::RegisterlibSceNgs2},
+    constexpr auto ModulesToLoad = std::to_array<SysModules>(
+        {{"libSceNgs2.sprx", &Libraries::Ngs2::RegisterLib},
          {"libSceUlt.sprx", nullptr},
          {"libSceJson.sprx", nullptr},
          {"libSceJson2.sprx", nullptr},
-         {"libSceLibcInternal.sprx", &Libraries::LibcInternal::RegisterlibSceLibcInternal},
-         {"libSceRtc.sprx", &Libraries::Rtc::RegisterlibSceRtc},
+         {"libSceLibcInternal.sprx", &Libraries::LibcInternal::RegisterLib},
          {"libSceCesCs.sprx", nullptr},
          {"libSceFont.sprx", nullptr},
          {"libSceFontFt.sprx", nullptr},
-         {"libSceFreeTypeOt.sprx", nullptr}}};
+         {"libSceFreeTypeOt.sprx", nullptr}});
 
     std::vector<std::filesystem::path> found_modules;
     const auto& sys_module_path = Common::FS::GetUserPath(Common::FS::PathType::SysModuleDir);
@@ -365,74 +391,70 @@ void Emulator::LoadSystemModules(const std::string& game_serial) {
     }
 }
 
-#ifdef ENABLE_QT_GUI
 void Emulator::UpdatePlayTime(const std::string& serial) {
     const auto user_dir = Common::FS::GetUserPath(Common::FS::PathType::UserDir);
-    QString filePath = QString::fromStdString((user_dir / "play_time.txt").string());
+    const auto filePath = (user_dir / "play_time.txt").string();
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadWrite | QIODevice::Text)) {
+    std::ifstream in(filePath);
+    if (!in && !std::ofstream(filePath)) {
         LOG_INFO(Loader, "Error opening play_time.txt");
         return;
     }
 
     auto end_time = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
-    int totalSeconds = duration.count();
+    int total_seconds = static_cast<int>(duration.count());
 
-    QTextStream in(&file);
-    QStringList lines;
-    QString content;
-    while (!in.atEnd()) {
-        content += in.readLine() + "\n";
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line)) {
+        lines.push_back(line);
     }
-    file.close();
+    in.close();
 
-    QStringList existingLines = content.split('\n', Qt::SkipEmptyParts);
-    int accumulatedSeconds = 0;
+    int accumulated_seconds = 0;
     bool found = false;
 
-    for (const QString& line : existingLines) {
-        QStringList parts = line.split(' ');
-        if (parts.size() == 2 && parts[0] == QString::fromStdString(serial)) {
-            QStringList timeParts = parts[1].split(':');
-            if (timeParts.size() == 3) {
-                int hours = timeParts[0].toInt();
-                int minutes = timeParts[1].toInt();
-                int seconds = timeParts[2].toInt();
-                accumulatedSeconds = hours * 3600 + minutes * 60 + seconds;
+    for (const auto& l : lines) {
+        std::istringstream iss(l);
+        std::string s, time_str;
+        if (iss >> s >> time_str && s == serial) {
+            int h, m, s_;
+            char c1, c2;
+            std::istringstream ts(time_str);
+            if (ts >> h >> c1 >> m >> c2 >> s_ && c1 == ':' && c2 == ':') {
+                accumulated_seconds = h * 3600 + m * 60 + s_;
                 found = true;
                 break;
             }
         }
     }
-    accumulatedSeconds += totalSeconds;
-    int hours = accumulatedSeconds / 3600;
-    int minutes = (accumulatedSeconds % 3600) / 60;
-    int seconds = accumulatedSeconds % 60;
-    QString playTimeSaved = QString::number(hours) + ":" +
-                            QString::number(minutes).rightJustified(2, '0') + ":" +
-                            QString::number(seconds).rightJustified(2, '0');
 
-    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QTextStream out(&file);
-        bool lineUpdated = false;
+    accumulated_seconds += total_seconds;
+    int hours = accumulated_seconds / 3600;
+    int minutes = (accumulated_seconds % 3600) / 60;
+    int seconds = accumulated_seconds % 60;
 
-        for (const QString& line : existingLines) {
-            if (line.startsWith(QString::fromStdString(serial))) {
-                out << QString::fromStdString(serial) + " " + playTimeSaved + "\n";
-                lineUpdated = true;
-            } else {
-                out << line << "\n";
-            }
-        }
+    std::string playTimeSaved = fmt::format("{:d}:{:02d}:{:02d}", hours, minutes, seconds);
 
-        if (!lineUpdated) {
-            out << QString::fromStdString(serial) + " " + playTimeSaved + "\n";
+    std::ofstream outfile(filePath, std::ios::trunc);
+    bool lineUpdated = false;
+    for (const auto& l : lines) {
+        std::istringstream iss(l);
+        std::string s;
+        if (iss >> s && s == serial) {
+            outfile << fmt::format("{} {}\n", serial, playTimeSaved);
+            lineUpdated = true;
+        } else {
+            outfile << l << "\n";
         }
     }
-    LOG_INFO(Loader, "Playing time for {}: {}", serial, playTimeSaved.toStdString());
+
+    if (!lineUpdated) {
+        outfile << fmt::format("{} {}\n", serial, playTimeSaved);
+    }
+
+    LOG_INFO(Loader, "Playing time for {}: {}", serial, playTimeSaved);
 }
-#endif
 
 } // namespace Core

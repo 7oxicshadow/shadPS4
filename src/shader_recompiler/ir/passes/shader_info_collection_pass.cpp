@@ -55,6 +55,16 @@ void Visit(Info& info, const IR::Inst& inst) {
         info.shared_types |= IR::Type::U32;
         break;
     case IR::Opcode::SharedAtomicIAdd64:
+    case IR::Opcode::SharedAtomicISub64:
+    case IR::Opcode::SharedAtomicSMin64:
+    case IR::Opcode::SharedAtomicUMin64:
+    case IR::Opcode::SharedAtomicSMax64:
+    case IR::Opcode::SharedAtomicUMax64:
+    case IR::Opcode::SharedAtomicInc64:
+    case IR::Opcode::SharedAtomicDec64:
+    case IR::Opcode::SharedAtomicAnd64:
+    case IR::Opcode::SharedAtomicOr64:
+    case IR::Opcode::SharedAtomicXor64:
         info.uses_shared_int64_atomics = true;
         [[fallthrough]];
     case IR::Opcode::LoadSharedU64:
@@ -63,6 +73,7 @@ void Visit(Info& info, const IR::Inst& inst) {
         break;
     case IR::Opcode::ConvertF16F32:
     case IR::Opcode::ConvertF32F16:
+    case IR::Opcode::BitCastU16F16:
     case IR::Opcode::BitCastF16U16:
         info.uses_fp16 = true;
         break;
@@ -84,6 +95,9 @@ void Visit(Info& info, const IR::Inst& inst) {
     case IR::Opcode::Discard:
     case IR::Opcode::DiscardCond:
         info.has_discard = true;
+        break;
+    case IR::Opcode::BitwiseXor32:
+        info.has_bitwise_xor = true;
         break;
     case IR::Opcode::ImageGather:
     case IR::Opcode::ImageGatherDref:

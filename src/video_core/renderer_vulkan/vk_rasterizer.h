@@ -68,7 +68,7 @@ public:
     void CpSync();
     u64 Flush();
     void Finish();
-    void ProcessFaults();
+    void OnSubmit();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;
@@ -90,10 +90,11 @@ private:
     void DepthStencilCopy(bool is_depth, bool is_stencil);
     void EliminateFastClear();
 
-    void UpdateDynamicState(const GraphicsPipeline& pipeline) const;
+    void UpdateDynamicState(const GraphicsPipeline& pipeline, bool is_indexed) const;
     void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
-    void UpdatePrimitiveState() const;
+    void UpdatePrimitiveState(bool is_indexed) const;
+    void UpdateRasterizationState() const;
 
     bool FilterDraw();
 
@@ -111,6 +112,7 @@ private:
     }
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
+    bool IsComputeImageCopy(const Pipeline* pipeline);
 
 private:
     friend class VideoCore::BufferCache;
@@ -141,7 +143,8 @@ private:
     boost::container::static_vector<BufferBindingInfo, Shader::NumBuffers> buffer_bindings;
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::TextureDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NumImages> image_bindings;
-    bool fault_process_pending{false};
+    bool fault_process_pending{};
+    bool attachment_feedback_loop{};
 };
 
 } // namespace Vulkan
