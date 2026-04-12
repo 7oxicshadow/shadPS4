@@ -53,8 +53,15 @@ struct BufferResource {
     }
 
     constexpr AmdGpu::Buffer GetSharp(const auto& info) const noexcept {
-        const auto buffer =
-            inline_cbuf ? inline_cbuf : info.template ReadUdSharp<AmdGpu::Buffer>(sharp_idx);
+        AmdGpu::Buffer buffer{};
+        if (inline_cbuf) {
+            buffer = inline_cbuf;
+            if (inline_cbuf.base_address > 1) {
+                buffer.base_address += info.pgm_base; // address fixup
+            }
+        } else {
+            buffer = info.template ReadUdSharp<AmdGpu::Buffer>(sharp_idx);
+        }
         if (!buffer.Valid()) {
             LOG_DEBUG(Render, "Encountered invalid buffer sharp");
             return AmdGpu::Buffer::Null();
@@ -64,6 +71,8 @@ struct BufferResource {
 };
 using BufferResourceList = boost::container::static_vector<BufferResource, NUM_BUFFERS>;
 
+enum class MipStorageFallbackMode : u32 { None, DynamicIndex, ConstantIndex };
+
 struct ImageResource {
     u32 sharp_idx;
     bool is_depth{};
@@ -71,6 +80,8 @@ struct ImageResource {
     bool is_array{};
     bool is_written{};
     bool is_r128{};
+    MipStorageFallbackMode mip_fallback_mode{};
+    u32 constant_mip_index{};
 
     constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
         AmdGpu::Image image{};
@@ -79,6 +90,7 @@ struct ImageResource {
         } else {
             const auto raw = info.template ReadUdSharp<u128>(sharp_idx);
             std::memcpy(&image, &raw, sizeof(raw));
+            image.pitch = image.width;
         }
         if (!image.Valid()) {
             LOG_DEBUG(Render_Vulkan, "Encountered invalid image sharp");
@@ -93,6 +105,13 @@ struct ImageResource {
             }
         }
         return image;
+    }
+
+    u32 NumBindings(const auto& info) const {
+        const AmdGpu::Image tsharp = GetSharp(info);
+        return (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex)
+                   ? (tsharp.last_level - tsharp.base_level + 1)
+                   : 1;
     }
 };
 using ImageResourceList = boost::container::static_vector<ImageResource, NUM_IMAGES>;

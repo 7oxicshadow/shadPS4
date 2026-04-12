@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
@@ -6,11 +6,18 @@
 #include "common/assert.h"
 #include "common/types.h"
 #include "input/controller.h"
+#include "input/input_handler.h"
 #include "input_mouse.h"
 
+#include <common/singleton.h>
+#include <emulator.h>
 #include "SDL3/SDL.h"
 
+extern Frontend::WindowSDL* g_window;
+
 namespace Input {
+
+extern std::list<std::pair<InputEvent, bool>> pressed_keys;
 
 int mouse_joystick_binding = 0;
 float mouse_deadzone_offset = 0.5, mouse_speed = 1, mouse_speed_offset = 0.1250;
@@ -63,33 +70,57 @@ void EmulateJoystick(GameController* controller, u32 interval) {
     SDL_GetRelativeMouseState(&d_x, &d_y);
 
     float output_speed =
-        SDL_clamp((sqrt(d_x * d_x + d_y * d_y) + mouse_speed_offset * 128) * mouse_speed,
+        SDL_clamp(sqrt(d_x * d_x + d_y * d_y) * mouse_speed + mouse_speed_offset * 128,
                   mouse_deadzone_offset * 128, 128.0);
 
     float angle = atan2(d_y, d_x);
     float a_x = cos(angle) * output_speed, a_y = sin(angle) * output_speed;
 
     if (d_x != 0 || d_y != 0) {
-        controller->Axis(0, axis_x, GetAxis(-0x80, 0x7f, a_x));
-        controller->Axis(0, axis_y, GetAxis(-0x80, 0x7f, a_y));
+        controller->Axis(axis_x, GetAxis(-0x80, 0x7f, a_x), false);
+        controller->Axis(axis_y, GetAxis(-0x80, 0x7f, a_y), false);
     } else {
-        controller->Axis(0, axis_x, GetAxis(-0x80, 0x7f, 0));
-        controller->Axis(0, axis_y, GetAxis(-0x80, 0x7f, 0));
+        controller->Axis(axis_x, GetAxis(-0x80, 0x7f, 0), false);
+        controller->Axis(axis_y, GetAxis(-0x80, 0x7f, 0), false);
     }
 }
 
-constexpr float constant_down_accel[3] = {0.0f, 10.0f, 0.0f};
+constexpr float constant_down_accel[3] = {0.0f, 9.81f, 0.0f};
 void EmulateGyro(GameController* controller, u32 interval) {
-    // LOG_INFO(Input, "todo gyro");
     float d_x = 0, d_y = 0;
     SDL_GetRelativeMouseState(&d_x, &d_y);
-    controller->Acceleration(1, constant_down_accel);
+    controller->UpdateAcceleration(constant_down_accel);
     float gyro_from_mouse[3] = {-d_y / 100, -d_x / 100, 0.0f};
     if (mouse_gyro_roll_mode) {
         gyro_from_mouse[1] = 0.0f;
         gyro_from_mouse[2] = -d_x / 100;
     }
-    controller->Gyro(1, gyro_from_mouse);
+    controller->UpdateGyro(gyro_from_mouse);
+}
+
+void EmulateTouchpad(GameController* controller, u32 interval) {
+    float x, y;
+    SDL_MouseButtonFlags mouse_buttons = SDL_GetMouseState(&x, &y);
+    controller->SetTouchpadState(0, (mouse_buttons & SDL_BUTTON_LMASK) != 0,
+                                 std::clamp(x / g_window->GetWidth(), 0.0f, 1.0f),
+                                 std::clamp(y / g_window->GetHeight(), 0.0f, 1.0f));
+    controller->Button(Libraries::Pad::OrbisPadButtonDataOffset::TouchPad,
+                       (mouse_buttons & SDL_BUTTON_RMASK) != 0);
+}
+
+void ApplyMouseInputBlockers() {
+    switch (mouse_mode) {
+    case MouseMode::Touchpad:
+        for (auto& k : pressed_keys) {
+            if (k.first.input.sdl_id == SDL_BUTTON_LEFT ||
+                k.first.input.sdl_id == SDL_BUTTON_RIGHT) {
+                k.second = true;
+            }
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 Uint32 MousePolling(void* param, Uint32 id, Uint32 interval) {
@@ -100,6 +131,9 @@ Uint32 MousePolling(void* param, Uint32 id, Uint32 interval) {
         break;
     case MouseMode::Gyro:
         EmulateGyro(controller, interval);
+        break;
+    case MouseMode::Touchpad:
+        EmulateTouchpad(controller, interval);
         break;
 
     default:

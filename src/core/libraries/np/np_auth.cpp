@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <mutex>
-#include "common/config.h"
 #include "common/logging/log.h"
+#include "core/emulator_settings.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/np/np_auth.h"
@@ -123,7 +123,9 @@ s32 GetAuthorizationCode(s32 req_id, const OrbisNpAuthGetAuthorizationCodeParame
 
     // Not sure what values are expected here, so zeroing these for now.
     std::memset(auth_code, 0, sizeof(OrbisNpAuthorizationCode));
-    *issuer_id = 0;
+    if (issuer_id != nullptr) {
+        *issuer_id = 0;
+    }
     return ORBIS_OK;
 }
 
@@ -361,7 +363,7 @@ s32 PS4_SYSV_ABI sceNpAuthDeleteRequest(s32 req_id) {
 }
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
-    g_signed_in = Config::getPSNSignedIn();
+    g_signed_in = EmulatorSettings.IsPSNSignedIn();
 
     LIB_FUNCTION("6bwFkosYRQg", "libSceNpAuth", 1, "libSceNpAuth", sceNpAuthCreateRequest);
     LIB_FUNCTION("N+mr7GjTvr8", "libSceNpAuth", 1, "libSceNpAuth", sceNpAuthCreateAsyncRequest);

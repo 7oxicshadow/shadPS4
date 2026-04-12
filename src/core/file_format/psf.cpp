@@ -36,6 +36,7 @@ bool PSF::Open(const std::filesystem::path& filepath) {
     }
 
     const u64 psfSize = file.GetSize();
+    ASSERT_MSG(psfSize != 0, "SFO file at {} is empty!", filepath.string());
     std::vector<u8> psf(psfSize);
     file.Seek(0);
     file.Read(psf);
@@ -112,6 +113,7 @@ bool PSF::Encode(const std::filesystem::path& filepath) const {
         LOG_ERROR(Core, "Failed to write PSF file. Written {} Expected {}", written,
                   psf_buffer.size());
     }
+    file.Close();
     return written == psf_buffer.size();
 }
 

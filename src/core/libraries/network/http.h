@@ -91,7 +91,7 @@ int PS4_SYSV_ABI sceHttpParseResponseHeader(const char* header, u64 headerLen, c
 int PS4_SYSV_ABI sceHttpParseStatusLine(const char* statusLine, u64 lineLen, int32_t* httpMajorVer,
                                         int32_t* httpMinorVer, int32_t* responseCode,
                                         const char** reasonPhrase, u64* phraseLen);
-int PS4_SYSV_ABI sceHttpReadData();
+int PS4_SYSV_ABI sceHttpReadData(s32 reqId, void* data, u64 size);
 int PS4_SYSV_ABI sceHttpRedirectCacheFlush();
 int PS4_SYSV_ABI sceHttpRemoveRequestHeader();
 int PS4_SYSV_ABI sceHttpRequestGetAllHeaders();
@@ -148,7 +148,7 @@ int PS4_SYSV_ABI sceHttpUnsetEpoll();
 int PS4_SYSV_ABI sceHttpUriBuild(char* out, u64* require, u64 prepare,
                                  const OrbisHttpUriElement* srcElement, u32 option);
 int PS4_SYSV_ABI sceHttpUriCopy();
-int PS4_SYSV_ABI sceHttpUriEscape();
+int PS4_SYSV_ABI sceHttpUriEscape(char* out, u64* require, u64 prepare, const char* in);
 int PS4_SYSV_ABI sceHttpUriMerge(char* mergedUrl, char* url, char* relativeUri, u64* require,
                                  u64 prepare, u32 option);
 int PS4_SYSV_ABI sceHttpUriParse(OrbisHttpUriElement* out, const char* srcUri, void* pool,

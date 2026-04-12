@@ -1,6 +1,7 @@
-// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <ctime>
 #include <thread>
 
 #include "common/assert.h"
@@ -16,7 +17,7 @@
 #include <windows.h>
 #include "common/ntapi.h"
 #else
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <date/tz.h>
 #endif
 #include <ctime>
@@ -485,25 +486,41 @@ Common::NativeClock* GetClock() {
 s32 PS4_SYSV_ABI sceKernelConvertUtcToLocaltime(time_t time, time_t* local_time,
                                                 struct OrbisTimesec* st, u64* dst_sec) {
     LOG_TRACE(Kernel, "Called");
-#ifdef __APPLE__
+#ifdef _WIN32
+    TIME_ZONE_INFORMATION tz{};
+    DWORD res = GetTimeZoneInformation(&tz);
+    *local_time = time - tz.Bias;
+
+    if (st != nullptr) {
+        st->t = time;
+        st->west_sec = -tz.Bias * 60;
+        st->dst_sec = res == TIME_ZONE_ID_DAYLIGHT ? -_dstbias : 0;
+    }
+
+    if (dst_sec != nullptr) {
+        *dst_sec = res == TIME_ZONE_ID_DAYLIGHT ? -_dstbias : 0;
+    }
+#else
+#if defined(__APPLE__) || defined(__FreeBSD__)
     // std::chrono::current_zone() not available yet.
     const auto* time_zone = date::current_zone();
 #else
     const auto* time_zone = std::chrono::current_zone();
-#endif
+#endif // __APPLE__
     auto info = time_zone->get_info(std::chrono::system_clock::now());
 
     *local_time = info.offset.count() + info.save.count() * 60 + time;
 
     if (st != nullptr) {
         st->t = time;
-        st->west_sec = info.offset.count() * 60;
+        st->west_sec = info.offset.count();
         st->dst_sec = info.save.count() * 60;
     }
 
     if (dst_sec != nullptr) {
         *dst_sec = info.save.count() * 60;
     }
+#endif // _WIN32
 
     return ORBIS_OK;
 }
@@ -531,6 +548,8 @@ void RegisterTime(Core::Loader::SymbolsResolver* sym) {
     initial_ptc = clock->GetUptime();
 
     // POSIX
+    LIB_FUNCTION("NhpspxdjEKU", "libkernel", 1, "libkernel", posix_nanosleep);
+    LIB_FUNCTION("NhpspxdjEKU", "libScePosix", 1, "libkernel", posix_nanosleep);
     LIB_FUNCTION("yS8U2TGCe1A", "libkernel", 1, "libkernel", posix_nanosleep);
     LIB_FUNCTION("yS8U2TGCe1A", "libScePosix", 1, "libkernel", posix_nanosleep);
     LIB_FUNCTION("QcteRwbsnV0", "libkernel", 1, "libkernel", posix_usleep);
